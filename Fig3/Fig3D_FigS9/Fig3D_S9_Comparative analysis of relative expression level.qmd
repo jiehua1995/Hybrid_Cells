@@ -1,0 +1,2145 @@
+---
+title: "Fig.3D, S9 Comparative analysis of relative expression level"
+author: "Jie Hua"
+date: 2025-12-03
+lang: en
+date-modified: 2026-05-26
+keywords: ["Dosage compensation","Transcriptome","Comparison"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: false
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(data.table)
+library(stringr)
+library(pbapply)
+library(tidyr)
+library(dplyr)
+library(limma)
+library(clusterProfiler)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(org.Dhybrid.eg.db)
+library(tibble)
+library(ape)
+library(ggtree)
+library(patchwork)
+library(RColorBrewer)
+library(scales)
+library(tidytext)
+```
+
+# Load the files
+
+## Define a folder
+
+```{r}
+#| echo: true
+#| warning: false
+
+folder_path <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome"
+#folder_path <- "F:\\Big Paper\\Processed data\\Fig3C_Dosage and Transcriptome"
+```
+
+## Load the matrix from RNA/DNA
+
+```{r}
+#| echo: true
+#| warning: false
+
+comparison_dt <- fread(paste0(folder_path,"\\comparison.csv"),header = T)
+```
+
+## Load the orthofinder matrix generated with protein-protein.
+
+```{r}
+#| echo: true
+#| warning: false
+
+mel_sim_orthofinder <- fread(file=paste0(folder_path,"\\dmel_dsim_orthofinder\\Orthogroups.tsv"),header = T,sep = "\t")
+```
+
+## Load the annotation GTF from IsoQuant
+
+```{r}
+#| echo: true
+#| warning: false
+
+isoquant_transcript_gtf <- paste0(folder_path,"\\transcriptome\\All.extended_annotation.gtf")
+
+```
+
+## Load the annotations from eggnogmapper
+
+```{r}
+#| echo: true
+#| warning: false
+
+eggnog_annotation_file <- paste0(folder_path,"\\proteome_annotation\\Isoquant.transcripts.fa.eggnog.emapper.annotations")
+
+```
+
+# Read the eggnog-mapper annotation
+
+Read the table
+
+```{r}
+#| echo: true 
+#| warning: false  
+
+col_names <- c(   "query", "seed_ortholog", "evalue", "score", "eggNOG_OGs", "max_annot_lvl",   "COG_category", "Description", "Preferred_name", "GOs", "EC", "KEGG_ko",   "KEGG_Pathway", "KEGG_Module", "KEGG_Reaction", "KEGG_rclass", "BRITE",   "KEGG_TC", "CAZy", "BiGG_Reaction", "PFAMs" )
+
+eggnog_annotation <- read.table(eggnog_annotation_file,sep = "\t",header = FALSE,comment.char = "#",stringsAsFactors = FALSE,quote = "")  
+
+colnames(eggnog_annotation) <- col_names 
+```
+
+According to orthogroups information, build orthogroup-GO relationship.
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 1. 建立蛋白 -> GO 映射，并处理空值
+eggnog_map <- eggnog_annotation[, c("query", "GOs")]
+eggnog_map$GOs[eggnog_map$GOs == "-"] <- ""
+
+# 2. 定义函数：输入蛋白ID向量或逗号分隔字符串，返回 GO 并集
+get_go_union <- function(protein_str) {
+  # 拆分蛋白ID
+  proteins <- trimws(unlist(strsplit(protein_str, ",")))
+  
+  # 找到对应的 GOs
+  gos <- eggnog_map$GOs[eggnog_map$query %in% proteins]
+  
+  # 拆分每个 GO 字符串成单个 GO
+  gos_list <- unlist(strsplit(gos, ","))
+  
+  # 去掉空值，取唯一并排序
+  unique_gos <- sort(unique(gos_list[gos_list != ""]))
+  
+  # 合并成字符串
+  paste(unique_gos, collapse = ",")
+}
+
+# 3. 对 mel_sim_orthofinder 两列应用 pbapply
+# mel列
+mel_sim_orthofinder$GO_union_mel <- pbapply::pbsapply(
+  mel_sim_orthofinder$isoquant_split.mel.pep.nostar, 
+  get_go_union
+)
+# Sim
+mel_sim_orthofinder$GO_union_sim <- pbapply::pbsapply(
+  mel_sim_orthofinder$isoquant_split.sim.pep.nostar, 
+  get_go_union
+)
+
+
+# 4. 查看结果
+head(mel_sim_orthofinder[, c("GO_union_mel", "GO_union_sim")])
+
+
+
+# 函数：取两个逗号分隔 GO 字符串的并集
+get_go_union_two <- function(go1, go2) {
+  go1_split <- unlist(strsplit(go1, ","))
+  go2_split <- unlist(strsplit(go2, ","))
+  
+  go1_split <- go1_split[go1_split != ""]
+  go2_split <- go2_split[go2_split != ""]
+  
+  union_go <- sort(unique(c(go1_split, go2_split)))
+  paste(union_go, collapse = ",")
+}
+
+# 使用 pbapply 的 pbsapply 显示进度条
+mel_sim_orthofinder$GO_union_all <- pbapply::pbsapply(
+  seq_len(nrow(mel_sim_orthofinder)), 
+  function(i) get_go_union_two(
+    mel_sim_orthofinder$GO_union_mel[i], 
+    mel_sim_orthofinder$GO_union_sim[i]
+  )
+)
+
+```
+
+# Covert protein-protein relationship to transcript-transcript relationship
+
+```{r}
+#| echo: true
+#| warning: false
+
+orthofinder <- as.data.table(mel_sim_orthofinder)
+
+# 需要处理的列
+
+cols_to_clean <- c("isoquant_split.mel.pep.nostar", "isoquant_split.sim.pep.nostar")
+
+for(col in cols_to_clean){
+  orthofinder[[col]] <- pbsapply(orthofinder[[col]], function(x){
+    if(is.na(x) || x == "") return(NA)
+    # 按逗号分割
+    ids <- unlist(strsplit(x, ",\\s*"))
+    # 去掉 .p1/.p2/.p3 后缀
+    ids <- str_replace(ids, "\\.p\\d+$", "")
+    # 去重
+    ids <- unique(ids)
+    # 合并回单元格
+    paste(ids, collapse = ", ")
+  })
+}
+
+orthofinder_subset <- orthofinder[, c("Orthogroup", "GO_union_all")]
+
+# ----------------------------
+# 2. 保存为 CSV
+# ----------------------------
+#write.csv(orthofinder_subset, file = "orthofinder_term2gene.csv", row.names = FALSE)
+```
+
+# Read GTF file and build transcript-gene relationship
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+# Define a function to get the mapping relationship
+read_isoquant_gtf <- function(isoquant_transcript_gtf){
+  # Read GTF file
+  gtf <- fread(isoquant_transcript_gtf, sep="\t", header=FALSE, data.table=TRUE, quote = "")
+  
+  # Name the columns
+   colnames(gtf) <- c("chr","source","type","start","end","score","strand","frame","attributes")
+  
+  # Extract only transcripts
+  trans <- gtf[type == "transcript"]
+  
+  # Extract gene_id and transcript_id
+  trans[, gene_id := str_match(attributes, 'gene_id "([^"]+)"')[,2]]
+  trans[, transcript_id := str_match(attributes, 'transcript_id "([^"]+)"')[,2]]
+  
+  # Return the transcript-gene mapping relationship
+  dt_matrix <- trans[, .(transcripts = paste(transcript_id, collapse=",")), by=gene_id]
+  
+  return(dt_matrix)
+}
+
+# Extract the relationship
+
+transcript_gene <- read_isoquant_gtf(isoquant_transcript_gtf)
+
+```
+
+Confirm if there is duplications
+
+```{r}
+#| echo: true
+#| warning: false
+
+cat("Check the duplications in the GTF: ",anyDuplicated(transcript_gene),"\n")
+
+# Split the multiple transcript IDs
+
+trans_gene_expanded <- transcript_gene[, .(
+  transcript = unlist(str_split(transcripts, ",\\s*"))
+), by = gene_id]
+
+cat("Check the duplications in the expanded table: ",anyDuplicated(trans_gene_expanded),"\n")
+
+```
+
+# Convert transcript-transcript relationship to gene-gene relationship
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Set a lookup table
+trans2gene <- setNames(trans_gene_expanded$gene_id, trans_gene_expanded$transcript)
+
+# The columns that need to be converted
+cols_to_replace <- c("isoquant_split.mel.pep.nostar", "isoquant_split.sim.pep.nostar")
+
+# Perform conversion
+for(col in cols_to_replace){
+  orthofinder[[col]] <- pbsapply(orthofinder[[col]], function(x){
+    if(is.na(x) || x == "") return(NA_character_)
+    
+    # 拆分逗号分隔的 transcript
+    transcripts <- str_split(x, ",\\s*")[[1]]
+    
+    # 替换为 gene_id，如果找不到就报错
+    genes <- sapply(transcripts, function(tr){
+      gene <- trans2gene[tr]
+      if(is.na(gene)) stop(paste("Transcript not found in lookup:", tr))
+      gene
+    })
+    
+    # 去重并合并
+    paste(unique(genes), collapse=",")
+  }, cl = 1)  # cl = 1 表示单线程，如果想用多线程可以改
+}
+
+
+#write.csv(orthofinder,file="orthofinder_gene.csv",row.names = F)
+```
+
+# Calculate the Allele-specific expression
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Step 0: 准备表达矩阵
+gene_expr_mat <- as.matrix(comparison_dt[, -c("chrom","start","end","gene"), with=FALSE])
+rownames(gene_expr_mat) <- comparison_dt$gene
+sample_cols <- colnames(gene_expr_mat)
+
+# Step 1: 构建基因名字占位表格
+orthogroup_dt <- data.table(Orthogroup = orthofinder$Orthogroup)
+
+# 将每个 Orthogroup 的 mel/sim 基因拆开，按列填充
+for(s in sample_cols){
+  orthogroup_dt[[paste0(s, "_mel")]] <- str_split(orthofinder$isoquant_split.mel.pep.nostar, ",\\s*")
+  orthogroup_dt[[paste0(s, "_sim")]] <- str_split(orthofinder$isoquant_split.sim.pep.nostar, ",\\s*")
+}
+
+# Step 2: 用 pbapply 遍历每个单元格，把基因名替换成表达量加和
+orthogroup_expr_dt <- copy(orthogroup_dt)
+
+cols_to_sum <- setdiff(colnames(orthogroup_expr_dt), "Orthogroup")
+
+for(i in seq_along(cols_to_sum)){
+  col <- cols_to_sum[i]
+  cat(sprintf("Processing column %d/%d: %s\n", i, length(cols_to_sum), col))
+  
+  orthogroup_expr_dt[[col]] <- pbsapply(orthogroup_expr_dt[[col]], function(genes){
+    genes <- genes[genes != ""]       # 移除空字符串
+    genes_exist <- genes[genes %in% rownames(gene_expr_mat)]
+    if(length(genes_exist) == 0) return(0)
+    sum(gene_expr_mat[genes_exist, str_remove(col, "_mel|_sim"), drop=TRUE], na.rm = TRUE)
+  })
+}
+
+```
+
+Have a quick check of the table
+
+```{r}
+#| echo: true
+#| warning: false
+
+head(orthogroup_expr_dt)
+
+```
+
+# Save all objects to .RData
+
+```{r}
+#| echo: true
+#| warning: false
+
+#save.image(file = "data.RData")
+
+load("data.RData")
+
+```
+
+# Enrichment analysis of orthogroups
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 假设 orthogroup_expr_dt 已经是 data.table
+dt <- copy(orthogroup_expr_dt)
+
+# 找出所有样本名（去掉 _mel/_sim），假设所有列都符合 "sample_repX_mel/sim" 格式
+all_cols <- colnames(dt)
+expr_cols <- all_cols[!all_cols %in% "Orthogroup"]
+
+# 提取样本前缀（去掉 _mel/_sim）
+sample_prefix <- unique(sub("_(mel|sim)$", "", expr_cols))
+
+# 初始化新的矩阵
+new_expr_dt <- data.table(Orthogroup = dt$Orthogroup)
+
+# 对每个样本计算 mel+sim
+for(s in sample_prefix){
+  mel_cols <- grep(paste0("^", s, "_mel$"), expr_cols, value = TRUE)
+  sim_cols <- grep(paste0("^", s, "_sim$"), expr_cols, value = TRUE)
+  
+  # 如果有多个重复列（rep1, rep2, rep3）就相加
+  new_expr_dt[[s]] <- rowSums(dt[, c(mel_cols, sim_cols), with = FALSE])
+}
+
+# 查看结果
+head(new_expr_dt)
+
+```
+
+# PCA and heatmap
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 1️⃣ 提取表达矩阵
+expr_mat <- as.matrix(new_expr_dt[, -1, with = FALSE])
+rownames(expr_mat) <- new_expr_dt$Orthogroup
+
+# 2️⃣ 去掉全零行（Orthogroup）
+expr_mat <- expr_mat[rowSums(expr_mat) != 0, ]
+
+# 3️⃣ 可选：去掉方差为 0 的行（或列）
+expr_mat <- expr_mat[apply(expr_mat, 1, var) != 0, ]
+
+# 4️⃣ PCA（样本为行，gene为列）
+pca_res <- prcomp(t(expr_mat), scale. = TRUE)
+
+pca_var <- pca_res$sdev^2
+pca_var_perc <- round(pca_var / sum(pca_var) * 100, 1)
+
+# 构建 PCA 数据框
+pca_df <- data.frame(
+  Sample = colnames(expr_mat),
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2]
+)
+
+# 可视化 PCA
+pca_transcriptome <- ggplot(pca_df, aes(x = PC1, y = PC2, label = Sample)) +
+  geom_point(size = 3, color = "steelblue") +
+  geom_text_repel(                
+    size = 5,
+    family = "sans",
+    color = "black",
+    max.overlaps = Inf            
+  ) +
+  theme_gray(base_size = 12) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 20,
+      family = "sans",
+      color = "black"
+    ),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      size = 15,
+      family = "sans",
+      color = "black"
+    ),
+    axis.text.y = element_text(
+      size = 15,
+      family = "sans",
+      color = "black"
+    ),
+    axis.title.x = element_text(
+      size = 20,
+      family = "sans",
+      color = "black"
+    ),
+    axis.title.y = element_text(
+      size = 20,
+      family = "sans",
+      color = "black"
+    ),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    plot.background  = element_rect(fill = "transparent", colour = NA),
+    legend.background = element_rect(fill = "transparent"),
+    legend.box.background = element_rect(fill = "transparent"),
+    panel.grid = element_blank(),
+    panel.spacing = unit(0.4, "lines"),
+    strip.background = element_rect(
+      fill = "transparent",
+      color = "NA",
+      linewidth = 0.8
+    ),
+    strip.text = element_text(
+      size = 16,
+      family = "sans",
+      color = "black"
+    ),
+    legend.position = "none"
+  ) +
+  ggtitle("PCA of Samples") +
+  # 横纵轴显示方差百分比
+  xlab(paste0("PC1 (", pca_var_perc[1], "%)")) +
+  ylab(paste0("PC2 (", pca_var_perc[2], "%)"))
+
+```
+
+ggplot2 version heatmap
+
+```{r}
+#| echo: true
+#| warning: false
+
+source("functions.R")
+
+res_heatmap2 <- ggtree_heatmap(
+  mat = expr_mat,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_row_tree = FALSE,
+  show_col_tree = TRUE,
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+  border_color = NA,
+  legend_name = "Z-score",
+  col_angle = 45
+)
+
+#res_heatmap2$plot
+
+```
+
+Save plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+pca_transcriptome_canvas <- pca_transcriptome + ggview::canvas(7.5, 7.5, units="in")
+
+pca_transcriptome_canvas
+#ggsave("pca_transcrioptome.pdf",pca_transcriptome,width=7.5, height=7.5,units="in",dpi = 1200)
+
+
+```
+
+# Comparative analysis
+
+## H4 to Ras3
+
+```{r}
+#| echo: true
+#| warning: false
+
+#1. 提取需要比较的列
+# 取表达矩阵（去掉 Orthogroup 列）
+expr_mat <- as.matrix(new_expr_dt[, -1, with = FALSE])
+rownames(expr_mat) <- new_expr_dt$Orthogroup
+
+expr_mat <- log2(expr_mat + 1)
+
+# 选择 Ras3 和 7B 的列
+ras3_cols <- grep("^Ras3", colnames(expr_mat), value = TRUE)
+b7_cols   <- grep("^7B", colnames(expr_mat), value = TRUE)
+
+expr_sub <- expr_mat[, c(ras3_cols, b7_cols)]
+
+#2. 构建分组信息
+group <- factor(c(rep("B7", length(b7_cols)), rep("Ras3", length(ras3_cols))))
+design <- model.matrix(~group)
+colnames(design) <- c("Intercept", "B7_vs_Ras3")
+
+#3. 使用 limma 进行差异分析
+fit <- lmFit(expr_sub, design)
+fit <- eBayes(fit)
+
+# 查看差异表达结果
+res_all <- topTable(fit, coef = "B7_vs_Ras3", number = Inf, sort.by = "none")
+head(res_all)
+
+```
+
+Perform Enrich analysis
+
+```{r}
+#| echo: true
+#| warning: false
+
+# ----------------------------
+# 提取上调和下调蛋白质
+# ----------------------------
+# 设置阈值
+padj_cutoff <- 0.05
+logFC_cutoff <- 1
+
+up_genes   <- rownames(res_all)[res_all$adj.P.Val < padj_cutoff & res_all$logFC > logFC_cutoff]
+down_genes <- rownames(res_all)[res_all$adj.P.Val < padj_cutoff & res_all$logFC < -logFC_cutoff]
+```
+
+up
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+ego_bp <- enrichGO(
+  gene = up_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+goplot(ego_bp)
+
+ego_cc <- enrichGO(
+  gene = up_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = up_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+```
+
+Save the Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("H4_Ras3_mel_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("H4_Ras3_mel_GO_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+```
+
+Other plots
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+source("functions.R")
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+
+plot_ego_up_emapplot+ggview::canvas(90,90,"mm",600,bg="transparent")
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("emap_pub.png",p_emap_pub,width=160,height=90,units="mm",bg="transparent")
+
+```
+
+down
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = down_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+goplot(ego_bp)
+
+ego_cc <- enrichGO(
+  gene = down_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = down_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("sim_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("sim_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("emap_pub.png",p_emap_pub,width=160,height=90,units="mm",bg="transparent")
+
+```
+
+## H4_mel to H4_sim
+
+Took 7B samples out.
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+data_7B <- orthogroup_expr_dt[
+  , c("Orthogroup", grep("^7B", names(orthogroup_expr_dt), value = TRUE)),
+  with = FALSE
+]
+
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 假设 orthogroup_expr_dt 是 data.table
+# 1. 提取表达矩阵，去掉第一列 Orthogroup
+expr_mat <- as.matrix(orthogroup_expr_dt[, -1, with = FALSE])
+rownames(expr_mat) <- orthogroup_expr_dt$Orthogroup
+
+# 可选：log2 转换
+expr_mat <- log2(expr_mat + 1)
+
+# 2. 选择 7B 的列
+b7_mel_cols <- grep("^7B.*_mel$", colnames(expr_mat), value = TRUE)
+b7_sim_cols <- grep("^7B.*_sim$", colnames(expr_mat), value = TRUE)
+
+expr_sub <- expr_mat[, c(b7_mel_cols, b7_sim_cols)]
+
+# 3. 构建分组信息
+group <- factor(c(rep("mel", length(b7_mel_cols)), rep("sim", length(b7_sim_cols))))
+design <- model.matrix(~group)
+colnames(design) <- c("Intercept", "mel_vs_sim")
+
+# 4. 使用 limma 进行差异分析
+fit <- lmFit(expr_sub, design)
+fit <- eBayes(fit)
+
+# 5. 查看差异表达结果
+res_7B <- topTable(fit, coef = "mel_vs_sim", number = Inf, sort.by = "none")
+
+head(res_7B)
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+# 统计数量
+n_up   <- sum(res_7B$adj.P.Val < 0.05 & res_7B$logFC > 1)
+n_down <- sum(res_7B$adj.P.Val < 0.05 & res_7B$logFC < -1)
+
+# 分类显著性
+res_7B$Significance <- "NotSig"
+res_7B$Significance[res_7B$adj.P.Val < 0.05 & res_7B$logFC > 1] <- "Up"
+res_7B$Significance[res_7B$adj.P.Val < 0.05 & res_7B$logFC < -1] <- "Down"
+
+# 计算 -log10(adj.P.Val)
+res_7B$negLogAdjP <- -log10(res_7B$adj.P.Val + 1e-10) # 防止log(0)
+```
+
+Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+# ----------------------------
+# 提取上调和下调蛋白质
+# ----------------------------
+# 设置阈值
+padj_cutoff <- 0.05
+logFC_cutoff <- 1
+
+mel_genes   <- rownames(res_7B)[res_7B$adj.P.Val < padj_cutoff & res_7B$logFC > logFC_cutoff]
+sim_genes <- rownames(res_7B)[res_7B$adj.P.Val < padj_cutoff & res_7B$logFC < -logFC_cutoff]
+```
+
+Mel specific
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("H4_mel_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("mel_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```
+
+Sim bias
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("h4_dsim_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("dsim_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("dsim_treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("dsim_emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```
+
+## H1_mel to H1_sim
+
+Took 5A samples out.
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+data_5A <- orthogroup_expr_dt[
+  , c("Orthogroup", grep("^5A", names(orthogroup_expr_dt), value = TRUE)),
+  with = FALSE
+]
+
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 假设 orthogroup_expr_dt 是 data.table
+# 1. 提取表达矩阵，去掉第一列 Orthogroup
+expr_mat <- as.matrix(orthogroup_expr_dt[, -1, with = FALSE])
+rownames(expr_mat) <- orthogroup_expr_dt$Orthogroup
+
+# 可选：log2 转换
+expr_mat <- log2(expr_mat + 1)
+
+# 2. 选择 7B 的列
+A5_mel_cols <- grep("^5A.*_mel$", colnames(expr_mat), value = TRUE)
+A5_sim_cols <- grep("^5A.*_sim$", colnames(expr_mat), value = TRUE)
+
+expr_sub <- expr_mat[, c(A5_mel_cols, A5_sim_cols)]
+
+# 3. 构建分组信息
+group <- factor(c(rep("mel", length(A5_mel_cols)), rep("sim", length(A5_sim_cols))))
+design <- model.matrix(~group)
+colnames(design) <- c("Intercept", "mel_vs_sim")
+
+# 4. 使用 limma 进行差异分析
+fit <- lmFit(expr_sub, design)
+fit <- eBayes(fit)
+
+# 5. 查看差异表达结果
+res_5A <- topTable(fit, coef = "mel_vs_sim", number = Inf, sort.by = "none")
+
+head(res_5A)
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+# 统计数量
+n_up   <- sum(res_5A$adj.P.Val < 0.05 & res_5A$logFC > 1)
+n_down <- sum(res_5A$adj.P.Val < 0.05 & res_5A$logFC < -1)
+
+# 分类显著性
+res_5A$Significance <- "NotSig"
+res_5A$Significance[res_5A$adj.P.Val < 0.05 & res_5A$logFC > 1] <- "Up"
+res_5A$Significance[res_5A$adj.P.Val < 0.05 & res_5A$logFC < -1] <- "Down"
+
+# 计算 -log10(adj.P.Val)
+res_5A$negLogAdjP <- -log10(res_5A$adj.P.Val + 1e-10) # 防止log(0)
+```
+
+Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+# ----------------------------
+# 提取上调和下调蛋白质
+# ----------------------------
+# 设置阈值
+padj_cutoff <- 0.05
+logFC_cutoff <- 1
+
+mel_genes   <- rownames(res_5A)[res_5A$adj.P.Val < padj_cutoff & res_5A$logFC > logFC_cutoff]
+sim_genes <- rownames(res_5A)[res_5A$adj.P.Val < padj_cutoff & res_5A$logFC < -logFC_cutoff]
+```
+
+Mel specific
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("h1_mel_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("mel_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```
+
+Sim bias
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("dsim_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("dsim_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("dsim_treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("dsim_emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```
+
+## H2_mel to H2_sim
+
+Took 5A samples out.
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+data_5B <- orthogroup_expr_dt[
+  , c("Orthogroup", grep("^5B", names(orthogroup_expr_dt), value = TRUE)),
+  with = FALSE
+]
+
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 假设 orthogroup_expr_dt 是 data.table
+# 1. 提取表达矩阵，去掉第一列 Orthogroup
+expr_mat <- as.matrix(orthogroup_expr_dt[, -1, with = FALSE])
+rownames(expr_mat) <- orthogroup_expr_dt$Orthogroup
+
+# 可选：log2 转换
+expr_mat <- log2(expr_mat + 1)
+
+# 2. 选择 7B 的列
+B5_mel_cols <- grep("^5B.*_mel$", colnames(expr_mat), value = TRUE)
+B5_sim_cols <- grep("^5B.*_sim$", colnames(expr_mat), value = TRUE)
+
+expr_sub <- expr_mat[, c(B5_mel_cols, B5_sim_cols)]
+
+# 3. 构建分组信息
+group <- factor(c(rep("mel", length(B5_mel_cols)), rep("sim", length(B5_sim_cols))))
+design <- model.matrix(~group)
+colnames(design) <- c("Intercept", "mel_vs_sim")
+
+# 4. 使用 limma 进行差异分析
+fit <- lmFit(expr_sub, design)
+fit <- eBayes(fit)
+
+# 5. 查看差异表达结果
+res_5B <- topTable(fit, coef = "mel_vs_sim", number = Inf, sort.by = "none")
+
+head(res_5B)
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+# 统计数量
+n_up   <- sum(res_5B$adj.P.Val < 0.05 & res_5B$logFC > 1)
+n_down <- sum(res_5B$adj.P.Val < 0.05 & res_5B$logFC < -1)
+
+# 分类显著性
+res_5B$Significance <- "NotSig"
+res_5B$Significance[res_5B$adj.P.Val < 0.05 & res_5B$logFC > 1] <- "Up"
+res_5B$Significance[res_5B$adj.P.Val < 0.05 & res_5B$logFC < -1] <- "Down"
+
+# 计算 -log10(adj.P.Val)
+res_5B$negLogAdjP <- -log10(res_5B$adj.P.Val + 1e-10) # 防止log(0)
+```
+
+Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+# ----------------------------
+# 提取上调和下调蛋白质
+# ----------------------------
+# 设置阈值
+padj_cutoff <- 0.05
+logFC_cutoff <- 1
+
+mel_genes   <- rownames(res_5B)[res_5B$adj.P.Val < padj_cutoff & res_5B$logFC > logFC_cutoff]
+sim_genes <- rownames(res_5B)[res_5B$adj.P.Val < padj_cutoff & res_5B$logFC < -logFC_cutoff]
+```
+
+Mel specific
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("h2mel_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("mel_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```
+
+Sim bias
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("dsim_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("dsim_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("dsim_treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("dsim_emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```
+
+## H3_mel to H3_sim
+
+Took 5A samples out.
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+data_6B <- orthogroup_expr_dt[
+  , c("Orthogroup", grep("^6B", names(orthogroup_expr_dt), value = TRUE)),
+  with = FALSE
+]
+
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 假设 orthogroup_expr_dt 是 data.table
+# 1. 提取表达矩阵，去掉第一列 Orthogroup
+expr_mat <- as.matrix(orthogroup_expr_dt[, -1, with = FALSE])
+rownames(expr_mat) <- orthogroup_expr_dt$Orthogroup
+
+# 可选：log2 转换
+expr_mat <- log2(expr_mat + 1)
+
+# 2. 选择 7B 的列
+B6_mel_cols <- grep("^6B.*_mel$", colnames(expr_mat), value = TRUE)
+B6_sim_cols <- grep("^6B.*_sim$", colnames(expr_mat), value = TRUE)
+
+expr_sub <- expr_mat[, c(B6_mel_cols, B6_sim_cols)]
+
+# 3. 构建分组信息
+group <- factor(c(rep("mel", length(B6_mel_cols)), rep("sim", length(B6_sim_cols))))
+design <- model.matrix(~group)
+colnames(design) <- c("Intercept", "mel_vs_sim")
+
+# 4. 使用 limma 进行差异分析
+fit <- lmFit(expr_sub, design)
+fit <- eBayes(fit)
+
+# 5. 查看差异表达结果
+res_6B <- topTable(fit, coef = "mel_vs_sim", number = Inf, sort.by = "none")
+
+head(res_6B)
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+# 统计数量
+n_up   <- sum(res_6B$adj.P.Val < 0.05 & res_6B$logFC > 1)
+n_down <- sum(res_6B$adj.P.Val < 0.05 & res_6B$logFC < -1)
+
+# 分类显著性
+res_6B$Significance <- "NotSig"
+res_6B$Significance[res_6B$adj.P.Val < 0.05 & res_6B$logFC > 1] <- "Up"
+res_6B$Significance[res_6B$adj.P.Val < 0.05 & res_6B$logFC < -1] <- "Down"
+
+# 计算 -log10(adj.P.Val)
+res_6B$negLogAdjP <- -log10(res_6B$adj.P.Val + 1e-10) # 防止log(0)
+```
+
+Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+# ----------------------------
+# 提取上调和下调蛋白质
+# ----------------------------
+# 设置阈值
+padj_cutoff <- 0.05
+logFC_cutoff <- 1
+
+mel_genes   <- rownames(res_6B)[res_6B$adj.P.Val < padj_cutoff & res_6B$logFC > logFC_cutoff]
+sim_genes <- rownames(res_6B)[res_6B$adj.P.Val < padj_cutoff & res_6B$logFC < -logFC_cutoff]
+```
+
+Mel specific
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = mel_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("h3_mel_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("mel_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```
+
+Sim bias
+
+```{r}
+#| echo: true
+#| warning: false
+
+ego_bp <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+ego_cc <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene = sim_genes,
+  OrgDb = org.Dhybrid.eg.db,
+  keyType = "GID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+#---------------------------
+# 2. drop level 1:2
+#---------------------------
+ego_bp2 <- dropGO(ego_bp, level = 1:2)
+ego_cc2 <- dropGO(ego_cc, level = 1:2)
+ego_mf2 <- dropGO(ego_mf, level = 1:2)
+
+#---------------------------
+# 3. 转成 data.frame 并手动加类别
+#---------------------------
+df_bp <- as.data.frame(ego_bp2)
+df_cc <- as.data.frame(ego_cc2)
+df_mf <- as.data.frame(ego_mf2)
+
+df_bp$ONTOLOGY <- "BP"
+df_cc$ONTOLOGY <- "CC"
+df_mf$ONTOLOGY <- "MF"
+
+# 可选：统一列顺序，防止老版本 bind_rows 时列位置乱掉
+common_cols <- union(
+  union(colnames(df_bp), colnames(df_cc)),
+  colnames(df_mf)
+)
+
+df_bp <- df_bp[, common_cols[common_cols %in% colnames(df_bp)], drop = FALSE]
+df_cc <- df_cc[, common_cols[common_cols %in% colnames(df_cc)], drop = FALSE]
+df_mf <- df_mf[, common_cols[common_cols %in% colnames(df_mf)], drop = FALSE]
+
+# 合并
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+
+p_bp <- bp_dotplot(df_bp) 
+
+p_all <- all_dotplot(df_all)
+
+p_bp_canvas <- p_bp + ggview::canvas(80,60,units="mm",dpi=600,bg="transparent")
+p_bp_canvas
+
+
+p_all_canvas <- p_all + ggview::canvas(100,170,units="mm",dpi=600,bg="transparent")
+p_all_canvas
+
+#ggsave("dsim_GO.pdf",p_bp,width=80,height=60,units="mm",bg="transparent")
+
+#ggsave("dsim_all.png",p_all,width=100,height=170,units="mm",dpi=900,bg="transparent")
+
+ego_up_drop <- dropGO(ego_bp, level = 1:2)
+edox2 <- enrichplot::pairwise_termsim(ego_up_drop)
+
+plot_ego_up_treeplot <- treeplot(edox2, cladelab_offset=20) + hexpand(.2)
+p_pub <- modify_treeplot_pub(
+  plot_ego_up_treeplot,
+  show_canvas = FALSE,
+  make_static = TRUE
+)
+
+plot_ego_up_emapplot <- emapplot(edox2, node_label = "group")
+
+p_emap_pub <- modify_emapplot_pub(
+  plot_ego_up_emapplot,
+  label_size = 18,        # 把圆上文字变大
+  font_family = "sans",
+  point_size_range = c(2, 7),
+  ellipse_show_border = FALSE
+)
+
+p_pub + ggview::canvas(160, 70, units = "mm", dpi = 600, bg = "transparent")
+
+#ggview::save_ggplot(p_pub,"treeplot.png",width=160,height=70,units="mm",dpi=900,bg="transparent")
+#ggsave("dsim_treeplot.pdf",p_pub,width=160,height=90,units="mm",bg="transparent")
+#ggsave("treeplot.png",p_pub,width=160,height=90,units="mm",dpi=900,bg="transparent")
+
+
+p_emap_pub + ggview::canvas(120, 90, units = "mm", dpi = 600, bg = "transparent")
+#ggsave("dsim_emap_pub.png",p_emap_pub,width=120,height=90,units="mm",bg="transparent")
+
+
+```

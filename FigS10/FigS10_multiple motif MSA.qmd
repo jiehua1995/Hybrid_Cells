@@ -1,0 +1,267 @@
+---
+title: "FigS10_rRNA motifscan visualization"
+author: "Jie Hua"
+date: 2026-03-29
+lang: en
+date-modified: 2026-03-29
+keywords: ["rDNA Quantification","Hybrid Cells","MotifScan"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: true
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load the required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(Biostrings)
+library(ggplot2)
+library(purrr)
+library(dplyr)
+library(patchwork)
+```
+
+# Define the motifs.csv file
+
+```{r}
+#| echo: true
+#| warning: false
+
+motifs_file <- "motifs.csv"
+```
+
+# Read the motifs.csv
+
+```{r}
+#| echo: true
+#| warning: false
+
+motifs <- read.csv(motifs_file, header=T, sep=",",fill=TRUE)
+
+```
+
+# Define a function
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+make_alignment_df <- function(sub_df, line_width = 200) {
+  
+  seq1 <- DNAString(sub_df$sequence[1])
+  seq2 <- DNAString(sub_df$sequence[2])
+  
+  aln <- pwalign::pairwiseAlignment(seq1, seq2, type = "global")
+  
+  s1 <- strsplit(as.character(pwalign::pattern(aln)), "")[[1]]
+  s2 <- strsplit(as.character(subject(aln)), "")[[1]]
+  
+  n <- length(s1)
+  
+  df <- data.frame(
+    pos = 1:n,
+    base1 = s1,
+    base2 = s2,
+    match = s1 == s2,
+    group = unique(sub_df$group),
+    seq1_name = sub_df$motif[1],
+    seq2_name = sub_df$motif[2]
+  )
+  
+  # 🔥 自动换行（关键）
+  df$block <- ceiling(df$pos / line_width)
+  df$x <- ((df$pos - 1) %% line_width) + 1
+  
+  # 长格式
+  df_long <- rbind(
+    data.frame(
+      group = df$group,
+      block = df$block,
+      x = df$x,
+      y = df$seq1_name,
+      base = df$base1,
+      match = df$match
+    ),
+    data.frame(
+      group = df$group,
+      block = df$block,
+      x = df$x,
+      y = df$seq2_name,
+      base = df$base2,
+      match = df$match
+    )
+  )
+  
+  df_long
+}
+```
+
+# Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+df <- motifs %>%
+  filter(!is.na(sequence)) %>%
+  group_by(group) %>%
+  filter(n() == 2) %>%
+  ungroup()
+
+df_align <- df %>%
+  group_by(group) %>%
+  group_split() %>%
+  map_dfr(make_alignment_df)
+
+my_family <- "sans"
+
+p <- ggplot(df_align, aes(x = x, y = y)) +
+  
+  # Background tiles
+  geom_tile(
+    aes(fill = match),
+    colour = NA
+  ) +
+  
+  # Bases
+  geom_text(
+    aes(label = base),
+    family = my_family,
+    size = 1.5,
+    colour = "black"
+  ) +
+  
+  facet_grid(
+    group ~ block,
+    scales = "free",
+    space = "free",
+    switch = "y"
+  )+
+  
+  scale_fill_manual(
+    values = c(
+      "TRUE"  = "grey80",
+      "FALSE" = "#2b8cbe"
+    )
+  ) +
+  
+  # x 是数字，所以 continuous
+  scale_x_continuous(
+    expand = c(0.02, 0.02)
+  ) +
+  
+  # y 是字符/因子，比如 18S_dmel，所以 discrete
+  scale_y_discrete(
+    expand = c(0, 0),
+    position = "right"
+  ) +
+  
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Facet labels
+    strip.text.x = element_blank(),
+    strip.text.y = element_text(
+      angle = 0,
+      hjust = 0.5,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    
+    # Axis text / ticks hidden
+    axis.text.x = element_blank(),
+    axis.text.y.left = element_blank(),
+    axis.text.y.right = element_text(
+      size = 5.5,
+      family = my_family,
+      color = "black",
+      margin = margin(l = 2, r = 0)
+    ),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    
+    # Facet spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.2, "lines"),
+    strip.placement = "outside",
+    strip.switch.pad.grid = unit(0, "pt"),
+    strip.clip = "off",
+    
+    # No legend
+    legend.position = "none",
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 2, l = 2)
+  )
+
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+p_canvas <- p + ggview::canvas(180, 60, units="mm",dpi=900,bg="transparent")
+p_canvas
+
+#ggsave( "FigS10.pdf",p,device = cairo_pdf,dpi=600,units="mm",width=180, height=60)
+
+
+```

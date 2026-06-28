@@ -1,0 +1,898 @@
+---
+title: "Fig2. Centromeric Coverage of D.mel contigs"
+author: "Jie Hua"
+date: 2025-09-29
+lang: en
+date-modified: 2025-11-20
+keywords: ["Centromere","Genomic Coverage","Hybrid Cells"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: true
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load the required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(viridis) 
+library(stringr)
+library(grid)
+```
+
+# Define the required parameters
+
+```{r}
+#| echo: true
+#| warning: false
+
+# home pc
+# Define the folder containing the bedgraph files
+#folder <- "F:\\Big Paper\\Processed data\\Fig3_Centromeric contigs coverage\\Centromere_Dmel"
+# The RepeatMasker annotation
+#gff <- "F:\\Big Paper\\Processed data\\Fig3_Centromeric contigs coverage\\Centromere_Dmel\\Ras3_centromere_consensus_truncated.fasta.out.gff"
+# The RepeatMakser out
+#repeatmasker_out <- "F:\\Big Paper\\Processed data\\Fig3_Centromeric contigs coverage\\Centromere_Dmel\\Ras3_centromere_consensus_truncated.fasta.out"
+
+# lab pc
+# Define the folder containing the bedgraph files
+folder <- "H:\\HybridCells_Data\\Fig2_Centromeric Contigs coverage\\Centromere_Dmel"
+# The RepeatMasker annotation
+gff <- "H:\\HybridCells_Data\\Fig2_Centromeric Contigs coverage\\Centromere_Dmel\\Ras3_centromere_consensus_truncated.fasta.out.gff"
+# The RepeatMakser out
+repeatmasker_out <- "H:\\HybridCells_Data\\Fig2_Centromeric Contigs coverage\\Centromere_Dmel\\Ras3_centromere_consensus_truncated.fasta.out"
+```
+
+# Load the coverage data
+
+I already used *bamcoverage* to transfer *bam* files to *bed* files.
+
+```{r}
+#| echo: true
+#| warning: false
+cat("The folder containing the bedgraph files is", folder, "\n")
+# List the bedGraph files
+bedgraph_files <- list.files(folder, pattern = "\\.bedgraph$", full.names = TRUE)
+cat("The bedGraph files (total number:", length(bedgraph_files), "):\n")
+print(bedgraph_files)
+```
+
+Load the *bedgraph* files to R
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_list <- list()
+for (file in bedgraph_files) {
+  data <- read.table(file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+  colnames(data) <- c("Chromosome", "Start", "End", "Counts")
+  data$total <- (data$End - data$Start)*data$Counts
+  file_name <- basename(file)
+  name <- sub(".chopped\\.bedgraph$", "", file_name)
+  data_list[[name]] <- data
+}
+cat("The names of the list containing all the bedgraph tables:\n")
+names(data_list)
+
+```
+
+I need to filter the data to select specific samples and chromosomes, and rename them.
+
+```{r}
+#| echo: true
+#| warning: false
+selected_sample <- c("Ras3","ML82","05a","05b_barcode17","06b","07b_barcode21")
+renamed_sample  <- c("Ras3","ML82","HYC1","HYC2","HYC3","HYC4")
+
+selected_chromosomes <- c("tig00057289", "3R_5", "Contig119", "Contig79")
+
+renamed_chromosomes <- c("Cen2_mel", "Cen3_mel", "Cen4_mel", "CenX_mel")
+
+# Build mapping relationship
+sample_map <- setNames(renamed_sample, selected_sample)
+chrom_map  <- setNames(renamed_chromosomes, selected_chromosomes)
+
+filtered_list <- lapply(selected_sample, function(smp) {
+  df <- data_list[[smp]]
+  df <- df[df$Chromosome %in% selected_chromosomes, ]
+  df$Chromosome <- chrom_map[df$Chromosome]
+  rownames(df) <- NULL
+  return(df)
+})
+
+names(filtered_list) <- sample_map
+```
+
+I want to check if it works.
+
+```{r}
+#| echo: true
+#| warning: false
+
+print(names(filtered_list))
+print(unique(filtered_list$Ras3$Chromosome))
+head(filtered_list$Ras3)
+```
+
+Merge all tables into one dataframe
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_all_raw <- bind_rows(
+  lapply(names(filtered_list), function(nm) {
+    df <- filtered_list[[nm]]
+    df$Sample <- nm
+    df
+  })
+)
+```
+
+# Normalization
+
+I need to check the distribution of counts first.
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+ggplot(data_all_raw, aes(x = Counts, weight = End - Start)) +
+  geom_density(fill = "skyblue", color = "black", alpha = 0.5) +
+  facet_wrap(~Sample, scales = "free_y") +
+  labs(
+    title = "Counts Density Distribution Across Samples",
+    x = "Counts",
+    y = "Density"
+  ) +
+  theme_minimal(base_family = "sans") + 
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black")
+  )
+```
+
+Apparently, I should perform transformation to make it like normal distribution.
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_all <- data_all_raw %>%
+  mutate(Counts_log2 = log2(Counts + 1))
+```
+
+Then I could check the distribution with log2 transfered counts
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+
+
+ggplot(data_all, aes(x = Counts_log2, weight = End - Start)) +
+  geom_density(fill = "skyblue", color = "black", alpha = 0.5) +
+  facet_wrap(~Sample, scales = "free_y") +
+  labs(
+    title = "Log2(Counts+1) Density Distribution Across Samples",
+    x = "log2(Counts + 1)",
+    y = "Density"
+  ) +
+  theme_minimal(base_family = "sans") +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.6), # 边框稍粗
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black")
+  )
+
+```
+
+# Plot the coverage information
+
+```{r}
+#| echo: true
+#| warning: false
+
+plot_genome_coverage <- function(data_all) {
+
+  # 计算染色体长度并生成标签
+  chrom_info <- data_all %>%
+    group_by(Chromosome) %>%
+    summarise(Length = max(End) - min(Start), .groups = "drop") %>%
+    mutate(Chromosome_label = paste0(Chromosome, "\n(", round(Length/1000, 2), " kb)"))
+
+  # 合并标签到数据
+  data_all <- data_all %>%
+    left_join(chrom_info, by = "Chromosome") %>%
+    mutate(
+      Chromosome_label = factor(Chromosome_label, levels = chrom_info$Chromosome_label),
+      Sample = factor(Sample, levels = rev(unique(Sample)))
+    )
+
+  # 自定义样本颜色
+  sample_colors <- c(
+    "Ras3" = "#1f78b4", "ML82" = "#33a02c",
+    "HYC1"   = "#e31a1c", "HYC2"   = "#ff7f00",
+    "HYC3"   = "#6a3d9a", "HYC4"   = "#b15928"
+  )
+
+  p <- ggplot(data_all) +
+    geom_rect(
+      aes(
+        xmin = Start,
+        xmax = End,
+        ymin = 0,
+        ymax = Counts_log2,
+        fill = Sample
+      ),
+      color = NA
+    ) +
+    facet_grid(
+      Sample ~ Chromosome_label,
+      scales = "free_x",
+      space = "free_x",
+      switch ="both"
+    ) +
+    scale_fill_manual(values = sample_colors) +
+    xlab("Chromosome") +
+    ylab(expression(log[2](Counts + 1))) +
+    theme_bw() +
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid = element_blank(),               # 去掉灰色网格线
+      panel.spacing = unit(0.2, "lines"),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+      strip.placement = "outside",
+      strip.background = element_blank(),
+      strip.text.x = element_text(angle = 0, hjust = 0.5, size = 9), # X轴标签不旋转
+      strip.text.y.left = element_text(angle = 0, size = 9), # Sample 标签左边
+      axis.text.x = element_blank(),  # X轴刻度数字取消
+      axis.ticks.x = element_blank(),
+      legend.position = "none",
+      strip.clip="off"
+    )
+
+  return(p)
+}
+
+# 使用示例
+plot_genome_coverage(data_all)
+
+```
+
+# Read the annotations
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+df_repeat <- read.delim(gff, header = FALSE, stringsAsFactors = FALSE,comment.char = "#")
+# Rename the table
+colnames(df_repeat) <- c("Chromosome", "Source", "Type", "Start", "End", "score", "strand", "phase", "attributes")
+# Extract the target
+df_repeat$Target <- str_extract(df_repeat$attributes, "(?<=Motif:)\\S+")
+# Rename the chromosomes
+chrom_map <- setNames(renamed_chromosomes, selected_chromosomes)
+df_repeat$Chromosome <- ifelse(df_repeat$Chromosome %in% selected_chromosomes,
+                          chrom_map[df_repeat$Chromosome],
+                          df_repeat$Chromosome)
+```
+
+Took the selected chromosomes
+
+```{r}
+#| echo: true
+#| warning: false
+
+df_repeat <- subset(df_repeat, Chromosome %in% renamed_chromosomes)
+
+```
+
+In order to color those repeats like a previous paper. I need to read the .*out* file from RepeatMasker.
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Read the RepeatMasker out file.
+lines <- readLines(repeatmasker_out)
+lines <- lines[-c(1:3)]
+lines <- lines[lines != ""]
+lines <- trimws(lines, which = "both")
+raw_list <- strsplit(lines, "\\s+", perl = TRUE)
+max_cols <- 15
+raw_matrix <- t(sapply(raw_list, function(x){
+  length(x) <- max_cols
+  x
+}))
+
+raw_out <- as.data.frame(raw_matrix, stringsAsFactors = FALSE)
+
+
+colnames(raw_out) <- c(
+  "SW_score", "perc_div", "perc_del", "perc_ins",
+  "query_sequence", "query_begin", "query_end", "query_left",
+  "strand", "repeat_name", "repeat_class_family",
+  "repeat_begin", "repeat_end", "repeat_left", "ID"
+)
+
+rep_info <- raw_out %>%
+  select(repeat_name, repeat_class_family) %>%
+  distinct()
+
+#write.csv(rep_info,"repeats_info.csv",row.names = F)
+
+rep_info
+```
+
+I need to highlight some repeats
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Dmel repeat library from the original paper
+rep_info_new <- rep_info %>%
+  mutate(
+    repeat_class_family = case_when(
+      
+      # Specific satallites
+      repeat_name == "90U_SAT" ~ "90-bp",
+      repeat_name == "365U_SAT" ~ "365-bp",
+      
+      # Jockey-3
+      repeat_name == "Jockey-3_Dmel_08212020" ~ "Jockey-3",
+      
+      # DNA
+      repeat_class_family %in% c(
+        "DNA/CMC-Transib", "DNA/P", "DNA/hAT-Ac",
+        "DNA/hAT-hobo", "DNA/PiggyBac", "DNA/TcMar-Tc1"
+      ) ~ "DNA transpon",
+      
+      # Non-LTR retrotransposon
+      repeat_class_family %in% c(
+        "Non-LTR_retrotransposon/CR1","Non-LTR_retrotransposon/I","Non-LTR_retrotransposon/Jockey","Non-LTR_retrotransposon/LOA","Non-LTR_retrotransposon/R1","Non-LTR_retrotransposon/R2"
+      ) ~ "Non-LTR retrotransposon",
+      
+      
+      # LTR retrotransposons
+      repeat_class_family %in% c(
+        "LTR/Copia", "LTR/Gypsy", "LTR/Pao"
+      ) ~ "LTR retrotransposon",
+      
+      # Satallite
+      repeat_class_family %in% c(
+        "Satellite/Rsp", "Satellite/Satellite"
+      ) ~ "Satellite",
+      
+      
+
+      # Simple & low complexity
+      repeat_class_family == "Simple_repeat" ~ "Simple Repeat",
+      
+      
+      # Others
+      repeat_class_family %in% c(
+        "Other/rDNA", "Other/IGS","rDNA/rDNA","RC/Helitron","Low_complexity"
+      ) ~ "Others",
+
+
+      TRUE ~ repeat_class_family  # 其他保持不变
+    )
+  )
+
+# rep_info_new <- rep_info %>%
+#   mutate(
+#     repeat_class_family = case_when(
+#       repeat_name == "(TCTTC)n" ~ "AAGAG",
+#       repeat_name == "(GAAGA)n" ~ "AAGAG",
+#       repeat_name == "(AAGAT)n" ~ "AAGAT",
+#       repeat_name == "(ATAAG)n" ~ "AAGAT",
+#       repeat_name == "(GAGAA)n" ~ "AAGAG",
+#       repeat_name == "(ATCTT)n" ~ "AATAG",
+#       repeat_name == "(AATAG)n" ~ "AATAG",
+#       repeat_name == "(ATTAT)n" ~ "AATAT",
+#       repeat_name == "(TTATA)n" ~ "AATAT",
+#       repeat_name == "(TATTA)n" ~ "AATAT",
+#       repeat_name == "(TAGAATAACA)n" ~ "prodsat",
+#       repeat_name == "DMSAT6" ~ "dodeca",
+#       repeat_name == "Transib5" ~ "DNA transpon",
+#       repeat_name == "ProtoP_A" ~ "DNA transpon",
+#       TRUE ~ repeat_class_family  # 其他保持不变
+#     )
+#   )
+
+
+
+```
+
+Annotate the **df_repeat** table
+
+```{r}
+#| echo: true
+#| warning: false
+
+df_repeat <- df_repeat %>%
+  left_join(
+    rep_info_new %>% select(repeat_name, repeat_class_family),
+    by = c("Target" = "repeat_name")
+  ) %>%
+  rename(Class_family = repeat_class_family)
+
+```
+
+# Add repeats annotation in the plot.
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+
+
+my_family = "sans"
+
+# -------------------------------
+# 1. 染色体信息
+# -------------------------------
+chrom_info <- data_all %>%
+  group_by(Chromosome) %>%
+  summarise(Length = max(End), .groups="drop") %>%
+  mutate(CumStart = cumsum(lag(Length, default=0)),
+         Chromosome_label = paste0(Chromosome))
+
+# -------------------------------
+# 2. data_all 绘图准备
+# -------------------------------
+data_all_plot <- data_all %>%
+  left_join(chrom_info, by="Chromosome") %>%
+  mutate(
+    Plot_Start = Start,
+    Plot_End   = End,
+    Plot_X = (Plot_Start + Plot_End)/2,             # geom_tile 需要中心 x
+    Width = Plot_End - Plot_Start,                 # geom_tile 宽度
+    Plot_Y = Counts_log2/2,                        # geom_tile 中心 y
+    Height = Counts_log2,                          # geom_tile 高度
+    Chromosome_label = factor(Chromosome_label, levels = chrom_info$Chromosome_label),
+    Sample = factor(Sample, levels = unique(Sample)),
+    Sample_group = case_when(
+      Sample == "Ras3" ~ "D. mel",
+      Sample == "ML82" ~ "D. sim",
+      TRUE ~ "Hybrid"
+    )
+  )
+
+# -------------------------------
+# 3. df_repeat 绘图准备
+# -------------------------------
+#selected_targets <- c("G2_DM", "DOC2_DM")  # 只显示的Target
+selected_targets <- rep_info_new$repeat_class_family
+df_repeat_plot <- df_repeat %>%
+  mutate(
+    Counts = 2,
+    Counts_log2 = 1,
+    total = (End - Start) * Counts,
+    Sample = "Repeats",
+    Target_plot = ifelse(Class_family %in% selected_targets, Class_family, "Others")
+  ) %>%
+  left_join(chrom_info, by="Chromosome") %>%
+  mutate(
+    Plot_Start = Start,
+    Plot_End   = End,
+    Plot_X = (Plot_Start + Plot_End)/2,
+    Width = Plot_End - Plot_Start,
+    Plot_Y = Counts_log2/2,
+    Height = Counts_log2,
+    Chromosome_label = factor(Chromosome_label, levels = chrom_info$Chromosome_label)
+  )
+
+# -------------------------------
+# 4. 设置颜色
+# -------------------------------
+sample_colors <- c(
+  "D. mel" = "#fb8b05",
+  "D. sim" = "#ed556a",
+  "Hybrid" = "#61649F"
+)
+
+target_levels <- unique(df_repeat_plot$Target_plot)
+target_colors <- setNames(rep("gray80", length(target_levels)), target_levels)
+#target_colors[selected_targets] <- viridis(length(selected_targets))
+
+target_colors <- c(
+  "Satellite"               = "#CCB69E",  # 中灰
+  "90-bp"                  = "#A7CDE2",  # 深蓝
+  "365-bp"                  = "#F0E442",  # 黄色
+  "Simple Repeat"           = "#E4BBD9",  # 浅蓝
+  "Others"                  = "#E0E0E0",  # 浅灰
+  "Non-LTR retrotransposon" = "#F5A216",  # 粉紫
+  "LTR retrotransposon"     = "#698B2D",  # 青绿色
+  "Jockey-3"                = "#D24591",  # 橙黄
+  "DNA transpon"            = "#E42220"  # 浅紫/粉
+)
+
+# colorblindcheck::palette_check(target_colors, plot = TRUE)
+
+
+
+
+# -------------------------------
+# 5. 绘制 data_all 图 (geom_tile)
+# -------------------------------
+p1 <- ggplot(data_all_plot) +
+  geom_tile(aes(
+    x = Plot_X, width = Width,
+    y = Plot_Y, height = Height,
+    fill = Sample_group
+  )) +
+  facet_grid(Sample ~ Chromosome_label, scales = "free_x", space = "free_x", switch="both") +
+  scale_y_continuous(
+    breaks = c(0,15),                 # 主刻度
+    minor_breaks = seq(0, 15, by = 5),    # 小刻度
+    limits = c(0, 18),                    # 可选：固定范围（建议加）
+    expand = c(0, 0.2),
+    guide = guide_axis(minor.ticks = TRUE),
+    labels = function(x) {
+      ifelse(x == 0, "0", paste0("", x))
+    }
+  )+
+  scale_fill_manual(values = sample_colors, name="Sample",drop=FALSE) +
+  xlab(NULL) + 
+  ylab(expression(Log[2](Counts + 1))) +
+  theme_bw(base_family = "sans") +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(color = "black",fill = NA,linewidth = 0.1),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Facet labels
+    strip.text.x = element_blank(),
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      family = my_family,
+      color = "black",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    
+    # Axis text
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.y = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 1, l = 0)
+    ),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      face = "italic",
+      margin = margin(t = 0, r = 0, b = 0, l = 0)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    # Facet spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    strip.placement = "outside",
+    strip.switch.pad.grid = unit(0, "pt"),
+    strip.clip = "off",
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  )
+
+# -------------------------------
+# 6. 绘制 df_repeat 图 (geom_tile)
+# -------------------------------
+p2 <- ggplot(df_repeat_plot) +
+  geom_tile(aes(
+    x = Plot_X, width = Width,
+    y = Plot_Y, height = Height,
+    fill = Target_plot
+  )) +
+  facet_grid(Sample ~ Chromosome_label, scales = "free_x", space = "free_x", switch="both") +
+  scale_x_continuous(
+    expand = c(0, 0),
+    limits=c(0,NA),
+    breaks = function(x) {
+    seq(
+      from = 0,
+      to   = ceiling(max(x)/10e3)*10e3,
+      by   = 10e3
+    )
+    },
+    minor_breaks = function(x) {
+    seq(
+        from = 0,
+        to   = ceiling(max(x)/2e3)*2e3,
+        by   = 2e3
+     )
+    },
+    labels = function(x) paste0(x/1e3, ""),
+    guide = guide_axis(minor.ticks = TRUE)
+  )+ # 关键：去掉 X 轴两端空白
+  scale_fill_manual(values = target_colors, name="Repeats") +
+  xlab(expression(italic("D. mel")~"Centrometric Contigs (kb)")) + 
+  ylab(NULL) +
+  theme_bw(base_family = "sans") +
+  theme(
+      # Transparent backgrounds
+      plot.background = element_rect(fill = "transparent", color = NA),
+      panel.background = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      strip.background = element_rect(fill = "transparent", color = NA),
+      
+      # Grid
+      panel.grid = element_blank(),
+      
+      # Border
+      panel.border = element_rect(
+        color = "black",
+        fill = NA,
+        linewidth = 0.1
+      ),
+      
+      # Avoid double-thick borders
+      axis.line = element_blank(),
+      
+      # Facet labels
+      strip.text.x = element_text(
+        angle = 0,
+        hjust = 0.5,
+        size = 6,
+        family = my_family,
+        color = "black",
+        margin = margin(t = 1, r = 0, b = 1, l = 0)
+      ),
+      strip.text.y.left = element_text(
+        angle = 0,
+        hjust = 1,
+        size = 6,
+        family = my_family,
+        color = "black",
+        margin = margin(t = 0, r = 1, b = 0, l = 1)
+      ),
+      
+      # Axis text
+      axis.text.x = element_text(
+        size = 6,
+        color = "black",
+        family = my_family
+      ),
+      axis.text.y = element_blank(),
+      
+      # Axis titles
+      axis.title.x = element_text(
+        size = 7,
+        color = "black",
+        family = my_family
+      ),
+      axis.title.y = element_text(
+        size = 7,
+        color = "black",
+        family = my_family
+      ),
+      
+      # Major ticks
+      axis.ticks.x = element_line(
+        linewidth = 0.2,
+        color = "black"
+      ),
+      axis.ticks.y = element_blank(),
+      axis.ticks.length = unit(1.5, "pt"),
+      
+      # Minor ticks
+      axis.minor.ticks.x = element_line(
+        linewidth = 0.1,
+        color = "black"
+      ),
+      axis.minor.ticks.y = element_line(
+        linewidth = 0.1,
+        color = "black"
+      ),
+      axis.minor.ticks.length.x = unit(0.8, "pt"),
+      axis.minor.ticks.length.y = unit(0.8, "pt"),
+      
+      # Compact legend
+      legend.position = "right",
+      legend.title = element_text(
+        size = 6,
+        color = "black",
+        family = my_family,
+        margin = margin(t = 0, r = 0, b = 1, l = 0)
+      ),
+      legend.text = element_text(
+        size = 6,
+        color = "black",
+        family = my_family,
+        margin = margin(t = 0, r = 0, b = 0, l = 2)
+      ),
+      legend.key.size = unit(6, "pt"),
+      legend.key.width = unit(6, "pt"),
+      legend.key.height = unit(6, "pt"),
+      legend.key.spacing.x = unit(1, "pt"),
+      legend.key.spacing.y = unit(1, "pt"),
+      
+      legend.spacing.x = unit(1, "pt"),
+      legend.spacing.y = unit(1, "pt"),
+      legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      legend.box.spacing = unit(2, "pt"),
+      
+      # Facet spacing
+      panel.spacing.x = unit(0.2, "lines"),
+      panel.spacing.y = unit(0.4, "lines"),
+      strip.placement = "outside",
+      strip.switch.pad.grid = unit(0, "pt"),
+      strip.clip = "off",
+      
+      # Plot margin
+      plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+    )
+
+# -------------------------------
+# 7. 纵向合并
+# -------------------------------
+#p <- plot_grid(p1, p2, ncol=1, align="v", axis="lr", rel_heights=c(4,1))
+#p
+
+
+# -------------------------------
+# 1. 提取 p1 的 legend（两列）
+# -------------------------------
+legend1 <- get_legend(
+  p1 +
+  guides(fill = guide_legend(ncol = 1))          # 两列显示
+)
+
+# -------------------------------
+# 2. 提取 p2 的 legend（两列）
+# -------------------------------
+legend2 <- get_legend(
+  p2 +
+  guides(fill = guide_legend(ncol = 1))
+)
+
+
+# -------------------------------
+# 3. 合并 p1 和 p2 图（不显示内部 legend）
+# -------------------------------
+p_combined <- plot_grid(
+  p1 + theme(legend.position="none"),
+  p2 + theme(legend.position="none"),
+  ncol = 1, align = "v", rel_heights = c(2.5, 1)
+)
+
+# -------------------------------
+# 4. 纵向排列两个 legend，并控制高度比例
+# -------------------------------
+legend_combined <- plot_grid(
+  legend1,
+  legend2,
+  ncol = 1,
+  rel_heights = c(1.4,6),
+  align = "v"
+)
+
+
+# -------------------------------
+# 5. 最终合并图和 legend
+# -------------------------------
+final_plot <- plot_grid(
+  p_combined,
+  legend_combined,
+  ncol = 2,
+  rel_widths = c(1, 0.22),
+  align = "h",       # 横向对齐
+  axis = "l"         # 对齐顶部
+)
+
+
+```
+
+View and save
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+
+final_plot_canvas <- final_plot + ggview::canvas(175,50,units="mm",dpi = 900,bg="transparent")
+final_plot_canvas
+
+#ggsave("fig2C.pdf",final_plot,width=175, height=50,units="mm",dpi = 900,bg="transparent")
+
+```

@@ -1,0 +1,247 @@
+---
+title: "Fig3B. MSL2 positive ratio quantification"
+author: "Jie Hua"
+date: 2026-04-07
+lang: en
+date-modified: 2026-04-07
+keywords: ["MSL2","IF","Quantification"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: false
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(data.table)
+library(ggplot2)
+library(scales)
+```
+
+# Read the quantification result
+
+Define the csv file
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Define the paf file
+csv_file <- "F:\\Big Paper\\Processed data\\Fig3B_Dosage compensation_IF_MSL2\\Quantification.csv"
+```
+
+Read the file
+
+```{r}
+#| echo: true
+#| warning: false
+
+dt <- fread(csv_file)
+```
+
+Calculate the ratio and plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+my_family <- "sans"
+
+# 保存原始列顺序
+my_order <- colnames(dt)
+
+# 宽表转长表
+long_dt <- melt(
+  dt,
+  variable.name = "Sample",
+  value.name = "Value"
+)
+
+# 去掉 NA
+long_dt <- long_dt[!is.na(Value)]
+
+# 统一转字符，避免 1/2 有时是数值有时是字符
+long_dt[, Value := as.character(Value)]
+
+# 统计每个 sample 中每个类别的数量
+count_dt <- long_dt[, .N, by = .(Sample, Value)]
+
+# 构造所有 sample 都有一个 Value == "2" 的组合
+all_sample_2 <- data.table(
+  Sample = my_order,
+  Value = "2"
+)
+
+# 补全缺失的 "2"
+count_2_dt <- merge(
+  all_sample_2,
+  count_dt[Value == "2"],
+  by = c("Sample", "Value"),
+  all.x = TRUE
+)
+
+# 没有 2 的样本补 0
+count_2_dt[is.na(N), N := 0]
+
+# 计算每个 sample 总数
+total_dt <- long_dt[, .(total = .N), by = Sample]
+
+# 合并并计算比例（保留 0~1 小数用于作图）
+plot_dt <- merge(count_2_dt, total_dt, by = "Sample")
+plot_dt[, proportion := N / total]
+
+# 百分比标签
+plot_dt[, label := sprintf("%.1f%%", proportion * 100)]
+
+# 横向图时，为了让显示顺序和原始列顺序一致，需要 rev()
+plot_dt[, Sample := factor(Sample, levels = rev(my_order))]
+
+# 画图
+p <- ggplot(plot_dt, aes(x = Sample, y = proportion)) +
+  geom_bar(
+    stat = "identity",
+    width = 0.7,
+    fill = "#61649F",
+    color = NA,
+    linewidth = 0.1
+  ) +
+  geom_text(
+    aes(label = label),
+    hjust = -0.1,
+    size = 2,
+    family = my_family,
+    color = "black"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1.3),
+    breaks = c(0, 0.5, 1),
+    labels = percent_format(accuracy = 1),
+    minor_breaks = seq(0, 1, 0.1),
+    guide = guide_axis(minor.ticks = TRUE),
+    expand = c(0.03, 0.03)
+  ) +
+  scale_x_discrete(
+    expand = c(0.1, 0.1)
+  ) +
+  coord_flip(clip = "off") +
+  labs(
+    x = "",
+    y = "X territory cells (%)"
+  ) +
+  theme_bw(base_family = "sans") +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    
+    # No legend
+    legend.position = "none",
+    
+    # Panel spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  )+
+  guides(
+      fill = guide_legend(
+        keywidth = unit(6, "pt"),
+        keyheight = unit(6, "pt"),
+        ncol = 1,
+        bycol = TRUE,
+        label.position = "right",
+        label.hjust = 0,
+        override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+      )
+    )
+```
+
+# Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_canvas <- p+ggview::canvas(45,30,units="mm",dpi=900,bg="transparent")
+p_canvas
+#ggsave( "quantification.pdf",p,dpi=900,units="mm",width=45, height=30)
+```

@@ -1,0 +1,569 @@
+---
+title: "Fig2A Genomic Coverage of hybrid cell lines"
+author: "Jie Hua"
+date: 2025-11-26
+lang: en
+date-modified: 2025-11-26
+keywords: ["Genomic Coverage","Hybrid Cells"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: true
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load the required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(viridis) 
+library(stringr)
+
+```
+
+# Define the required parameters
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Define the folder containing the bedgraph files
+folder <- "F:\\Big Paper\\Processed data\\Fig3_Genomic_coverage\\100bp_window"
+# The genes annotation
+gtf <- "F:\\Big Paper\\Processed data\\Fig3_Genomic_coverage\\All.extended_annotation.gtf"
+# The RepeatMakser annotation
+repeatmasker_gff <- "F:\\Big Paper\\Processed data\\Fig3_Genomic_coverage\\ras3_dsim3_hybrid.repeatmasker.out.gff"
+
+# Lab PC
+# Define the folder containing the bedgraph files
+#folder <- "H:\\HybridCells_Data\\Fig2_Genomic_coverage\\100bp_window"
+# The genes annotation
+#gtf <- "H:\\HybridCells_Data\\Fig2_Genomic_coverage\\All.extended_annotation.gtf"
+# The RepeatMakser annotation
+#repeatmasker_gff <- "H:\\HybridCells_Data\\Fig2_Genomic_coverage\\ras3_dsim3_hybrid.repeatmasker.out.gff"
+
+
+
+```
+
+# Load the coverage data
+
+I already used *bamcoverage* to transfer *bam* files to *bed* files.
+
+```{r}
+#| echo: true
+#| warning: false
+cat("The folder containing the bedgraph files is", folder, "\n")
+# List the bedGraph files
+bedgraph_files <- list.files(folder, pattern = "\\.bedGraph$", full.names = TRUE)
+cat("The bedGraph files (total number:", length(bedgraph_files), "):\n")
+print(bedgraph_files)
+```
+
+Load the *bedgraph* files to R
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_list <- list()
+for (file in bedgraph_files) {
+  data <- read.table(file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+  colnames(data) <- c("Chromosome", "Start", "End", "Counts")
+  data$total <- (data$End - data$Start)*data$Counts
+  file_name <- basename(file)
+  name <- sub("_q30_coverage_100bp\\.bedGraph$", "", file_name)
+  data_list[[name]] <- data
+}
+cat("The names of the list containing all the bedgraph tables:\n")
+names(data_list)
+
+```
+
+I need to filter the data to select specific samples and chromosomes, and rename them.
+
+```{r}
+#| echo: true
+#| warning: false
+selected_sample <- c("Ras3","ML82","05a","05b_barcode18","06b","07b_barcode22")
+renamed_sample  <- c("Ras3","ML82","HYC1","HYC2","HYC3","HYC4")
+
+selected_chromosomes <- c("chrX_mel", "chr2L_mel", "chr2R_mel", "chr3L_mel","chr3R_mel","chr4_mel","chrX_sim", "chr2L_sim", "chr2R_sim", "chr3L_sim","chr3R_sim","chr4_sim")
+
+renamed_chromosomes <- c("chrX_mel", "chr2L_mel", "chr2R_mel", "chr3L_mel","chr3R_mel","chr4_mel","chrX_sim", "chr2L_sim", "chr2R_sim", "chr3L_sim","chr3R_sim","chr4_sim")
+
+# Build mapping relationship
+sample_map <- setNames(renamed_sample, selected_sample)
+chrom_map  <- setNames(renamed_chromosomes, selected_chromosomes)
+
+filtered_list <- lapply(selected_sample, function(smp) {
+  df <- data_list[[smp]]
+  df <- df[df$Chromosome %in% selected_chromosomes, ]
+  df$Chromosome <- chrom_map[df$Chromosome]
+  rownames(df) <- NULL
+  return(df)
+})
+
+names(filtered_list) <- sample_map
+```
+
+I want to check if it works.
+
+```{r}
+#| echo: true
+#| warning: false
+
+print(names(filtered_list))
+print(unique(filtered_list$Ras3$Chromosome))
+head(filtered_list$Ras3)
+```
+
+Merge all tables into one dataframe
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_all_raw <- bind_rows(
+  lapply(names(filtered_list), function(nm) {
+    df <- filtered_list[[nm]]
+    df$Sample <- nm
+    df
+  })
+)
+```
+
+# Normalization
+
+I need to check the distribution of counts first.
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+ggplot(data_all_raw, aes(x = Counts, weight = End - Start)) +
+  geom_density(fill = "skyblue", color = "black", alpha = 0.5) +
+  facet_wrap(~Sample, scales = "free_y") +
+  labs(
+    title = "Counts Density Distribution Across Samples",
+    x = "Counts",
+    y = "Density"
+  ) +
+  theme_minimal(base_family = "sans") + 
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black")
+  )
+```
+
+Apparently, I should perform transformation to make it like normal distribution.
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_all <- data_all_raw %>%
+  mutate(Counts_log2 = log2(Counts + 1))
+```
+
+Then I could check the distribution with log2 transfered counts
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+
+ggplot(data_all, aes(x = Counts_log2, weight = End - Start)) +
+  geom_density(fill = "skyblue", color = "black", alpha = 0.5) +
+  facet_wrap(~Sample, scales = "free_y") +
+  labs(
+    title = "Log2(Counts+1) Density Distribution Across Samples",
+    x = "log2(Counts + 1)",
+    y = "Density"
+  ) +
+  theme_minimal(base_family = "sans") +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.6), # 边框稍粗
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black")
+  )
+
+```
+
+# Plot the coverage information
+
+```{r}
+#| echo: true
+#| warning: false
+
+# ============================================================
+# Theme for genome coverage plot
+# ============================================================
+
+theme_genome_coverage <- function(my_family = "sans") {
+  theme_bw(base_family = my_family) +
+    theme(
+      # Transparent backgrounds
+      plot.background = element_rect(fill = "transparent", color = NA),
+      panel.background = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      strip.background = element_rect(fill = "transparent", color = NA),
+      
+      # Grid
+      panel.grid = element_blank(),
+      
+      # Border
+      panel.border = element_rect(
+        color = "black",
+        fill = NA,
+        linewidth = 0.1
+      ),
+      
+      # Avoid double-thick borders
+      axis.line = element_blank(),
+      
+      # Facet labels
+      strip.text.x = element_text(
+        angle = 0,
+        hjust = 0.5,
+        size = 6,
+        family = my_family,
+        color = "black",
+        margin = margin(t = 1, r = 0, b = 1, l = 0)
+      ),
+      strip.text.y.left = element_text(
+        angle = 0,
+        hjust = 1,
+        size = 6,
+        family = my_family,
+        color = "black",
+        margin = margin(t = 0, r = 3, b = 0, l = 1)
+      ),
+      
+      # Axis text
+      axis.text.x = element_text(
+        size = 6,
+        color = "black",
+        family = my_family
+      ),
+      axis.text.y = element_text(
+        size = 6,
+        color = "black",
+        family = my_family
+      ),
+      
+      # Axis titles
+      axis.title.x = element_text(
+        size = 7,
+        color = "black",
+        family = my_family
+      ),
+      axis.title.y = element_text(
+        size = 7,
+        color = "black",
+        family = my_family
+      ),
+      
+      # Major ticks
+      axis.ticks.x = element_line(
+        linewidth = 0.2,
+        color = "black"
+      ),
+      axis.ticks.y = element_line(
+        linewidth = 0.2,
+        color = "black"
+      ),
+      axis.ticks.length = unit(1.5, "pt"),
+      
+      # Minor ticks
+      axis.minor.ticks.x = element_line(
+        linewidth = 0.1,
+        color = "black"
+      ),
+      axis.minor.ticks.y = element_line(
+        linewidth = 0.1,
+        color = "black"
+      ),
+      axis.minor.ticks.length.x = unit(0.8, "pt"),
+      axis.minor.ticks.length.y = unit(0.8, "pt"),
+      
+      # Compact legend
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(
+        size = 6,
+        color = "black",
+        family = my_family,
+        face = "italic",
+        margin = margin(t = 0, r = 0, b = 0, l = 2)
+      ),
+      legend.key.size = unit(6, "pt"),
+      legend.key.width = unit(6, "pt"),
+      legend.key.height = unit(6, "pt"),
+      legend.key.spacing.x = unit(1, "pt"),
+      legend.key.spacing.y = unit(1, "pt"),
+      
+      legend.spacing.x = unit(1, "pt"),
+      legend.spacing.y = unit(1, "pt"),
+      legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      legend.box.spacing = unit(2, "pt"),
+      
+      # Facet spacing
+      panel.spacing.x = unit(0.2, "lines"),
+      panel.spacing.y = unit(0.4, "lines"),
+      strip.placement = "outside",
+      strip.switch.pad.grid = unit(0, "pt"),
+      strip.clip = "off",
+      
+      # Plot margin
+      plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+    )
+}
+
+
+# ============================================================
+# Genome coverage plot function
+# ============================================================
+
+plot_genome_coverage <- function(
+  data_all,
+  renamed_chromosomes,
+  show_length = FALSE,
+  sample_order = NULL,
+  my_family = "sans"
+) {
+  
+  # ------------------------------------------------------------
+  # Add Sample_group
+  # ------------------------------------------------------------
+  
+  data_all <- data_all %>%
+    mutate(
+      Sample_group = case_when(
+        Sample == "Ras3" ~ "D. mel",
+        Sample == "ML82" ~ "D. sim",
+        TRUE ~ "Hybrid"
+      )
+    )
+  
+  # ------------------------------------------------------------
+  # Group colors
+  # ------------------------------------------------------------
+  
+  sample_colors <- c(
+    "D. mel" = "#fb8b05",
+    "D. sim" = "#ed556a",
+    "Hybrid" = "#61649F"
+  )
+  
+  # ------------------------------------------------------------
+  # Sample order
+  # facet_grid rows follow factor levels from top to bottom
+  # ------------------------------------------------------------
+  
+  if (is.null(sample_order)) {
+    sample_order <- unique(data_all$Sample)
+  }
+  
+  missing_samples <- setdiff(sample_order, unique(data_all$Sample))
+  
+  if (length(missing_samples) > 0) {
+    warning(
+      "These samples in sample_order are not found in data_all$Sample: ",
+      paste(missing_samples, collapse = ", ")
+    )
+  }
+  
+  # ------------------------------------------------------------
+  # Chromosome information and labels
+  # ------------------------------------------------------------
+  
+  chrom_info <- data_all %>%
+    group_by(Chromosome) %>%
+    summarise(
+      Length = max(End, na.rm = TRUE) - min(Start, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Chromosome_short = sub("^chr", "", Chromosome),
+      Chromosome_label = if (show_length) {
+        paste0(
+          Chromosome_short,
+          "\n(",
+          round(Length / 1e6, 2),
+          " Mb)"
+        )
+      } else {
+        Chromosome_short
+      }
+    )
+  
+  # ------------------------------------------------------------
+  # Check chromosome order
+  # ------------------------------------------------------------
+  
+  missing_chromosomes <- setdiff(renamed_chromosomes, chrom_info$Chromosome)
+  
+  if (length(missing_chromosomes) > 0) {
+    warning(
+      "These chromosomes in renamed_chromosomes are not found in data_all$Chromosome: ",
+      paste(missing_chromosomes, collapse = ", ")
+    )
+  }
+  
+  # Only keep chromosomes that exist in data
+  renamed_chromosomes_use <- intersect(
+    renamed_chromosomes,
+    chrom_info$Chromosome
+  )
+  
+  chrom_info <- chrom_info %>%
+    slice(match(renamed_chromosomes_use, Chromosome))
+  
+  # ------------------------------------------------------------
+  # Merge labels back to data
+  # ------------------------------------------------------------
+  
+  data_all <- data_all %>%
+    left_join(chrom_info, by = "Chromosome") %>%
+    filter(!is.na(Chromosome_label)) %>%
+    mutate(
+      Chromosome_label = factor(
+        Chromosome_label,
+        levels = chrom_info$Chromosome_label
+      ),
+      Sample = factor(
+        Sample,
+        levels = sample_order
+      ),
+      Sample_group = factor(
+        Sample_group,
+        levels = c("D. mel", "D. sim", "Hybrid")
+      )
+    )
+  
+  # ------------------------------------------------------------
+  # Plot
+  # ------------------------------------------------------------
+  
+  p <- ggplot(data_all) +
+    geom_rect(
+      aes(
+        xmin = Start,
+        xmax = End,
+        ymin = 0,
+        ymax = Counts_log2,
+        fill = Sample_group
+      ),
+      color = NA,
+      linewidth = 0,
+      alpha = 0.95
+    ) +
+    facet_grid(
+      rows = vars(Sample),
+      cols = vars(Chromosome_label),
+      scales = "free_x",
+      space = "free_x",
+      switch = "both"
+    ) +
+    scale_fill_manual(
+      values = sample_colors,
+      name = "Sample",
+      drop = FALSE
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      breaks = function(x) {
+        seq(
+          from = floor(min(x, na.rm = TRUE) / 10e6) * 10e6,
+          to = ceiling(max(x, na.rm = TRUE) / 10e6) * 10e6,
+          by = 10e6
+        )
+      },
+      minor_breaks = function(x) {
+        seq(
+          from = floor(min(x, na.rm = TRUE) / 2e6) * 2e6,
+          to = ceiling(max(x, na.rm = TRUE) / 2e6) * 2e6,
+          by = 2e6
+        )
+      },
+      guide = guide_axis(minor.ticks = TRUE),
+      labels = function(x) {
+        paste0(x / 1e6)
+      }
+    ) +
+    scale_y_continuous(
+      breaks = c(0, 8),
+      minor_breaks = seq(0, 8, by = 2),
+      limits = c(0, 10),
+      expand = c(0, 0.2),
+      guide = guide_axis(minor.ticks = TRUE),
+      labels = function(x) {
+        ifelse(x == 0, "0", paste0("\u2007\u2007", x))
+      }
+    ) +
+    labs(
+      x = "Chromosome (Mb)",
+      y = expression(log[2](Counts + 1))
+    ) +
+    theme_genome_coverage(my_family = my_family) +
+    guides(
+      fill = guide_legend(
+        keywidth = unit(6, "pt"),
+        keyheight = unit(6, "pt"),
+        ncol = 1,
+        bycol = TRUE,
+        label.position = "right",
+        label.hjust = 0,
+        override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+      )
+    )
+  
+  return(p)
+}
+
+# 使用示例 
+p1 <- plot_genome_coverage(data_all, renamed_chromosomes, F)
+
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Have a look to confirm the size
+p1_canvas <- p1+ggview::canvas(166, 50, units="mm",dpi=200,bg="transparent")
+p1_canvas
+#ggsave("fig2A.pdf",p1,width=166,height=50,units="mm",dpi=900,bg="transparent")
+```

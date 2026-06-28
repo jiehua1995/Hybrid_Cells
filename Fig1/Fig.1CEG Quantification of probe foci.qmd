@@ -1,0 +1,625 @@
+---
+title: "Fig1. Quantification of probe foci"
+author: "Jie Hua"
+date: 2025-10-01
+lang: en
+date-modified: 2026-04-08
+keywords: ["IF","Probe","Hybrid Cells","DNA-FISH"]
+code-copy: true
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: true
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(ggsignif)
+library(dunn.test)
+library(tinytable)
+```
+
+# Load quantification data
+
+I have already counted the number of probe foci. The result is in multiple csv file.
+
+## Define a function to import the *.csv* files
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Write a loop to read all the csv files in one folder, save data to a list and then merge them into one data frame
+data_import <- function(folder, pattern){
+  # Get all the files in the folder
+  cat ("The folder is: ", folder, "\n")
+  files <- list.files(folder, pattern = pattern, full.names = TRUE)
+  # Create an empty list to store the data
+  data_list <- list()
+  # Loop through all the files
+  for (file in files){
+    cat ("Reading file: ", file, "\n")
+    # Read the data
+    data <- read.csv(file)
+    # Store the data in the list
+    data_list[[file]] <- data
+  }
+  # Merge all the data into one data frame
+  data <- do.call(rbind, data_list)
+  rownames(data) <- NULL
+  return(data)
+}
+```
+
+## Read the tables
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Read the quantification result
+data_raw <- data_import(folder="F:\\Big Paper\\Processed data\\Fig1 DNA-FISH probe dot quantification",pattern="\\.csv$")
+
+#data_raw <- data_import(folder="H:\\HybridCells_Data\\Fig1 Probe Foci Quantification\\Processed_data_Fig1sup_Probe Dots Quantification",pattern="\\.csv$")
+```
+
+Have a quick check
+
+```{r}
+#| echo: true
+#| warning: false
+#| label: Rawdata preview
+
+tinytable::tt(head(data_raw, 10))
+```
+
+Rename those samples
+
+Four hybrid cell lines were renamed as "HYC1" to "HYC4".
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_raw <- data_raw %>%
+  mutate(Sample = recode(Sample,
+                         "5a" = "HYC1",
+                         "5b" = "HYC2",
+                         "6b" = "HYC3",
+                         "7b" = "HYC4"))
+
+data_raw <- data_raw %>%
+  mutate(Probe = recode(Probe,
+                        "probe1"="Dmel/Dsim",
+                        "probe23"="Dsim",
+                        "probe24"="Dmel"
+    
+  ))
+```
+
+# Summarize the data
+
+```{r}
+#| echo: true
+#| warning: false
+
+data_summarise <- data_raw %>%
+  dplyr::summarise(
+    Mean = mean(Number),
+    SD = sd(Number),
+    Count = n(),
+    .by = c(Sample, Probe)
+  )
+```
+
+A quick boxplot for the data
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-width: 8
+#| fig-height: 5
+#| fig-align: center
+
+# Dot plot does not work. Too many dots.
+boxplot <- ggplot(data_raw, aes(x = Sample, y = Number, fill = Probe)) +
+  geom_boxplot(
+    alpha = 0.45,
+    color = "black",
+    linewidth = 0.25,
+    outlier.size = 0.4,
+    outlier.alpha = 0.25,
+    position = position_dodge(width = 0.75)
+  ) +
+  stat_summary(
+    fun = median,
+    geom = "text",
+    aes(label = round(after_stat(y), 1), group = Probe),
+    position = position_dodge(width = 0.75),
+    vjust = -0.45,
+    color = "black",
+    size = 2.6,
+    fontface = "bold"
+  ) +
+  scale_fill_viridis_d(
+    option = "D",
+    end = 0.9
+  ) +
+  labs(
+    x = "Sample",
+    y = "Number",
+    fill = "Probe"
+  ) +
+  theme_classic(base_size = 8) +
+  theme(
+    axis.line = element_line(linewidth = 0.3, color = "black"),
+    axis.ticks = element_line(linewidth = 0.25, color = "black"),
+    axis.text = element_text(color = "black", size = 7),
+    axis.text.x = element_text(angle = 35, hjust = 1, vjust = 1),
+    axis.title = element_text(color = "black", size = 8),
+    
+    legend.position = "right",
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7, face = "italic"),
+    legend.key.size = unit(4, "mm"),
+    
+    plot.margin = margin(4, 8, 4, 4)
+  )
+
+boxplot
+```
+
+# Define a function to perform static test and make plot
+
+## Function A: auto Y-axis
+
+```{r}
+#| echo: true
+#| warning: false
+
+report_probe <- function(data_raw, probe, exclude_samples,custom_order, custom_colors){
+  
+  # Select specific probe and exclude some sample
+  subset_data <- data_raw[data_raw$Probe == probe, ]
+  subset_data <- subset_data[!subset_data$Sample %in% exclude_samples, ]
+  
+  # Shapiro.test
+  shapiro_results <- lapply(split(subset_data, subset_data$Sample), function(group) {
+    if (length(unique(group$Number)) > 1) {
+      return(shapiro.test(group$Number)$p.value)
+    } else {
+      return(NA)
+    }
+  })
+  
+  # Print the Shapiro.test result
+  cat(paste("Probe:", probe, "\n"))
+  for (sample in names(shapiro_results)) {
+    p_value <- shapiro_results[[sample]]
+    if (!is.na(p_value)) {
+      cat(sprintf("Sample: %s Shapiro-Wilk p-value: %.2e\n", sample, p_value))
+    } else {
+      cat(sprintf("Sample: %s Shapiro-Wilk test skipped (all values are the same)\n", sample))
+    }
+  }
+  
+
+  # Kruskal-Wallis test
+  kruskal_result <- kruskal.test(Number ~ Sample, data = subset_data)
+  cat(sprintf("Kruskal-Wallis p-value for Probe %s: %.2e\n\n", probe, kruskal_result$p.value))
+  kruskal_p_value <- kruskal_result$p.value
+  kruskal_p_text <- paste("Kruskal-Wallis p-value:", format(kruskal_p_value, digits = 2))
+  
+  # Dunn test（Bonferroni correction）
+  dunn_result <- dunn.test(subset_data$Number, subset_data$Sample, method = "bonferroni")
+  
+  # Extract the result
+  comparisons <- data.frame(
+    group = dunn_result$comparisons,
+    p_value = dunn_result$P.adjusted
+  )
+  
+  # Add Probe Information
+  comparisons$Probe <- probe
+  # 筛选感兴趣的组对（vs SL2 或 ML82）
+  filtered_comparisons <- comparisons[
+    (grepl("Ras3|ML82", comparisons$group) & grepl("HYC1|HYC2|HYC3|HYC4", comparisons$group)) |
+      grepl("ML82 - Ras3", comparisons$group),
+  ]
+  comparisons <- filtered_comparisons
+  
+  # 计算 Y 轴的下限，避免覆盖数据
+  y_min <- min(subset_data$Number)
+  y_min <- ifelse(y_min >= 0, 0, y_min * 1.2)
+  
+  # 创建箱线图
+  boxplot <- ggplot(subset_data, aes(x = Sample, y = Number, fill = Sample)) +
+    geom_boxplot(
+      size = 0.5,               # 较细的边框
+      colour = "grey20",        # 浅灰边框，不挡住中位数
+      outlier.color = "grey40",  # 离群点也浅灰色
+      fatten = 3,
+    )+
+    labs(
+      #title = paste("Boxplot of Number for Probe:", probe),
+      x = "Sample",
+      y = bquote("Number of "*italic(.(probe))*" Probe Foci")
+    ) +
+    scale_x_discrete(limits = custom_order) +
+    scale_fill_manual(values = custom_colors) +
+    scale_y_continuous(expand = c(0, 0), limits = c(y_min, max(subset_data$Number + 8))) +
+    theme_minimal() +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+      #axis.line = element_line(color = "black", linewidth  = 0.5),
+      #plot.title = element_text(hjust = 0.5, size = 14, family = "sans", face = "bold", color = "black"),
+      axis.text.x = element_text(hjust = 0.5,size = 15,family = "sans",color="black"),
+      axis.text.y = element_text(size = 15,family = "sans",color="black"),
+      axis.title.x = element_text(size = 15,family = "sans",color="black"),
+      axis.title.y = element_text(size = 15,family = "sans",color="black"),
+      legend.position = "none",
+      panel.grid = element_blank(),
+      )+
+    # 添加 Kruskal-Wallis p 值到左上角
+    annotate(
+      "text",
+      x = 1, y = max(subset_data$Number) + 7.5,
+      hjust = 0,# 调整位置
+      label = kruskal_p_text,
+      size = 5, color = "black"
+    )
+  
+  # 遍历每个比较结果，添加显著性标注到图中
+  for (i in 1:nrow(comparisons)) {
+    group <- unlist(strsplit(comparisons$group[i], " - "))
+    p_value <- comparisons$p_value[i]
+    
+    # 根据 p 值设置显著性标注
+    significance <- ifelse(p_value < 0.001, "***",
+                           ifelse(p_value < 0.01, "**",
+                                  ifelse(p_value < 0.05, "*", "ns")))
+    
+    # 在图中添加显著性
+    boxplot <- boxplot +
+      geom_signif(
+        comparisons = list(group),
+        annotations = significance,
+        y_position = max(subset_data$Number) + 0.6*i,
+        textsize = 5,
+        map_signif_level = FALSE,
+        size = 0.5
+      )
+  }
+  
+  return(list(boxplot=boxplot, comparisons=comparisons))
+  
+}
+
+```
+
+## Function B: fixed Y-axis
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+report_probe2 <- function(data_raw, probe, exclude_samples, custom_order, custom_colors) {
+  
+  subset_data <- data_raw[data_raw$Probe == probe, ]
+  subset_data <- subset_data[!subset_data$Sample %in% exclude_samples, ]
+  
+  # Shapiro.test
+  shapiro_results <- lapply(split(subset_data, subset_data$Sample), function(group) {
+    if (length(unique(group$Number)) > 1) {
+      return(shapiro.test(group$Number)$p.value)
+    } else {
+      return(NA)
+    }
+  })
+  
+  cat(paste("Probe:", probe, "\n"))
+  for (sample in names(shapiro_results)) {
+    p_value <- shapiro_results[[sample]]
+    if (!is.na(p_value)) {
+      cat(sprintf("Sample: %s Shapiro-Wilk p-value: %.2e\n", sample, p_value))
+    } else {
+      cat(sprintf("Sample: %s Shapiro-Wilk test skipped (all values are the same)\n", sample))
+    }
+  }
+  
+  # Kruskal-Wallis test
+  kruskal_result <- kruskal.test(Number ~ Sample, data = subset_data)
+  cat(sprintf("Kruskal-Wallis p-value for Probe %s: %.2e\n\n", probe, kruskal_result$p.value))
+  
+  kruskal_p_value <- kruskal_result$p.value
+  kruskal_p_text <- paste("Kruskal-Wallis p-value:", format(kruskal_p_value, digits = 2))
+  
+  # Dunn test
+  dunn_result <- dunn.test(subset_data$Number, subset_data$Sample, method = "bonferroni")
+  
+  comparisons <- data.frame(
+    group = dunn_result$comparisons,
+    p_value = dunn_result$P.adjusted
+  )
+  
+  comparisons$Probe <- probe
+  
+  filtered_comparisons <- comparisons[
+    (grepl("Ras3|ML82", comparisons$group) & grepl("HYC1|HYC2|HYC3|HYC4", comparisons$group)) |
+      grepl("ML82 - Ras3", comparisons$group),
+  ]
+  comparisons <- filtered_comparisons
+  
+  # ===== 固定坐标轴与注释位置 =====
+  y_lim <- c(0, 17)
+  kw_y <- 16.5
+  sig_start <- 6.5
+  sig_step <- 0.93
+  
+  boxplot <- ggplot(subset_data, aes(x = Sample, y = Number, fill = Sample)) +
+    geom_boxplot(
+      size = 0.2,
+      colour = "grey20",
+      outlier.color = NA,
+      fatten = 1.5
+    ) +
+    labs(
+      x = "",
+      y = bquote(""*italic(.(probe))*" Probe Foci")
+    ) +
+    scale_x_discrete(limits = custom_order) +
+    scale_fill_manual(values = custom_colors) +
+    scale_y_continuous(
+      expand = c(0.05, 0),
+      limits = y_lim,
+      breaks = seq(0, 15, by = 5),         # 主刻度
+      minor_breaks = seq(0, 15, by = 1),   # 小刻度
+      guide = guide_axis(minor.ticks = TRUE)
+    )+
+    theme_bw() +
+    theme(
+      # 背景透明
+      panel.background = element_rect(fill = "transparent", color = NA),
+      plot.background  = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA),
+      strip.background = element_rect(fill = "transparent", color = NA),
+      panel.grid = element_blank(),
+      panel.spacing.x = unit(0.6, "lines"),
+      panel.spacing.y = unit(0.5, "lines"),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+      axis.text.x = element_text(size = 6, color = "black"),
+      axis.text.y = element_text(size = 6, color = "black"),
+      axis.title.x = element_blank(),
+      axis.title.y = element_text(size = 7),
+      
+      # 主刻度
+      axis.ticks.x = element_line(linewidth = 0.2, color = "black"),
+      axis.ticks.y = element_line(linewidth = 0.2, color = "black"),
+      axis.ticks.length = unit(1.5, "pt"),
+      # 小刻度：需要单独控制
+      axis.minor.ticks.x = element_line(linewidth = 0.1, color = "black"),
+      axis.minor.ticks.length.x = unit(0.8, "pt"),
+      # 图例
+      legend.position = "none",
+      strip.clip = "off",
+      plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+      
+      
+      
+    ) +
+    annotate(
+      "text",
+      x = 1,
+      y = kw_y,
+      hjust = 0,
+      label = kruskal_p_text,
+      size = 1.8,
+      color = "black"
+    )
+  
+  for (i in 1:nrow(comparisons)) {
+    group <- unlist(strsplit(comparisons$group[i], " - "))
+    p_value <- comparisons$p_value[i]
+    
+    significance <- ifelse(
+      p_value < 0.001, "***",
+      ifelse(p_value < 0.01, "**",
+             ifelse(p_value < 0.05, "*", "ns"))
+    )
+    
+    boxplot <- boxplot +
+      geom_signif(
+        comparisons = list(group),
+        annotations = significance,
+        y_position = sig_start + sig_step * (i - 1),
+        textsize = 1.3,
+        vjust = 0.1,
+        margin_top = 0.01,
+        map_signif_level = FALSE,
+        size = 0.25
+      )
+  }
+  
+  return(list(boxplot = boxplot, comparisons = comparisons))
+}
+```
+
+## Function C: remove significance stars
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+report_probe3 <- function(data_raw, probe, exclude_samples, custom_order, custom_colors) {
+  
+  subset_data <- data_raw[data_raw$Probe == probe, ]
+  subset_data <- subset_data[!subset_data$Sample %in% exclude_samples, ]
+  
+  # ===== Y-axis =====
+  y_lim <- c(0, 6)
+  
+  boxplot <- ggplot(subset_data, aes(x = Sample, y = Number, fill = Sample)) +
+    geom_boxplot(
+      linewidth = 0.2,
+      colour = "grey65",
+      box.colour = "grey65",
+      whisker.colour = "grey65",
+      median.colour = "black",
+      median.linewidth = 0.3,
+      outlier.color = NA,
+      fatten = 1.5
+    )+
+    labs(
+      x = "",
+      y = bquote("" * italic(.(probe)) * " Probe Foci")
+    ) +
+    scale_x_discrete(limits = custom_order) +
+    scale_fill_manual(values = custom_colors) +
+    scale_y_continuous(
+      expand = c(0.02, 0),
+      limits = y_lim,
+      breaks = seq(0, 5, by = 1),
+      minor_breaks = NULL
+    ) +
+    theme_bw(base_family = "Arial") +
+    theme(
+      # Transparent background
+      panel.background = element_rect(fill = "transparent", color = NA),
+      plot.background  = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA),
+      strip.background = element_rect(fill = "transparent", color = NA),
+      
+      panel.grid = element_blank(),
+      panel.spacing.x = unit(0.6, "lines"),
+      panel.spacing.y = unit(0.5, "lines"),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.3),
+      
+      # X 轴文字旋转 45 度
+      axis.text.x = element_text(
+        size = 6,
+        color = "black",
+        angle = 45,
+        hjust = 1,
+        vjust = 1
+      ),
+      axis.text.y = element_text(size = 6, color = "black"),
+      axis.title.x = element_blank(),
+      axis.title.y = element_text(size = 7),
+      
+      # 坐标轴刻度
+      axis.ticks.x = element_line(linewidth = 0.2, color = "black"),
+      axis.ticks.y = element_line(linewidth = 0.2, color = "black"),
+      axis.ticks.length = unit(1.5, "pt"),
+      
+      # 不显示图例
+      legend.position = "none",
+      strip.clip = "off",
+      plot.margin = margin(t = 2, r = 1, b = 1, l = 1),
+      text = element_text(family = "Arial")
+    )
+  
+  return(list(
+    boxplot = boxplot,
+    data = subset_data
+  ))
+}
+
+```
+
+# Plot for every probe
+
+## Prepare colors
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+#| fig-width: 6
+#| fig-height: 3
+
+# Take three type of color from viridis
+#cols <- viridis(3)
+cols <- c("#DCCC77","#88CDEE","#D68C99")
+# Have a preview of those colors
+barplot(1:3, col = cols, names.arg = c("0%", "50%", "100%"))
+
+# Define the order and color of each sample
+custom_order <- c("Ras3", "ML82", "HYC1", "HYC2", "HYC3", "HYC4")
+custom_colors <- c("Ras3" = cols[1], "ML82" = cols[3], "HYC1" = cols[2], "HYC2" = cols[2], "HYC3" = cols[2], "HYC4" = cols[2])
+```
+
+## *Dmel/Dsim* probe
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+#| fig-width: 5
+#| fig-height: 6
+
+
+probe1 <- report_probe3(data_raw, "Dmel/Dsim", exclude_samples=c("SL2"), custom_order, custom_colors)
+
+probe1_boxplot_canvas <- probe1$boxplot + ggview::canvas(46.6, 32.6, units="mm",dpi=900,bg="transparent")
+probe1_boxplot_canvas
+
+#ggsave( "fig1C.pdf",probe1$boxplot,dpi=1200,units="mm",width=46.6, height=32.6, device = cairo_pdf)
+```
+
+## *Dsim* probe
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+#| fig-width: 5
+#| fig-height: 6
+
+
+probe23 <- report_probe3(data_raw, "Dsim", exclude_samples=c("SL2"), custom_order, custom_colors)
+
+probe23_boxplot_canvas <- probe23$boxplot + ggview::canvas(46.6, 32.6, units="mm",dpi=900,bg="transparent")
+probe23_boxplot_canvas
+
+#ggsave( "fig1E.pdf",probe23$boxplot,dpi=1200,units="mm",width=46.6, height=32.6,device = cairo_pdf)
+```
+
+## *Dmel* probe
+
+```{r}
+#| echo: true
+#| warning: false
+#| fig-align: center
+#| fig-width: 5
+#| fig-height: 6
+
+
+probe24 <- report_probe3(data_raw, "Dmel", exclude_samples=c("SL2"), custom_order, custom_colors)
+
+probe24_boxplot_canvas <- probe24$boxplot + ggview::canvas(46.6, 32.6, units="mm",dpi=900,bg="transparent")
+probe24_boxplot_canvas
+
+#ggsave( "fig1G.pdf",probe24$boxplot,dpi=1200,units="mm",width=46.6, height=32.6,device = cairo_pdf)
+```

@@ -1,0 +1,1342 @@
+---
+title: "Fig4_rRNA motifscan visualization"
+author: "Jie Hua"
+date: 2026-03-29
+lang: en
+date-modified: 2026-03-29
+keywords: ["rDNA Quantification","Hybrid Cells"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: true
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load the required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(stringr)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(grid)
+```
+
+# Define the data folder
+
+```{r}
+#| echo: true
+#| warning: false
+
+folder <- "F:\\Big Paper\\Processed data\\Fig4_rDNA_motifscan"
+#folder <- "H:\\HybridCells_Data\\rDNA_motifscan"
+```
+
+# Read the *.csv* files
+
+```{r}
+#| echo: true
+#| warning: false
+
+files <- list.files(folder, pattern = "\\.csv$", full.names = TRUE)
+
+# 读取并处理
+df_all <- map_dfr(files, function(f) {
+  
+  # 提取文件名
+  fname <- basename(f)
+  
+  # 提取 sample（.rDNA 前面的部分）
+  sample_name <- sub("\\.rDNA.*$", "", fname)
+  
+  # 读取数据
+  df <- read_csv(f, show_col_types = FALSE)
+  
+  # 添加 sample 列
+  df %>%
+    mutate(sample = sample_name)
+})
+
+```
+
+# Extract data for rDNA quantification
+
+```{r}
+#| echo: true
+#| warning: false
+
+sample_map <- tibble(
+  sample = c("Ras3","ML82","5A", "5B_barcode19","6B","7B_barcode23"),
+  new_sample = c("Ras3","ML82","HYC1", "HYC2","HYC3","HYC4")
+)
+
+df_rDNA <- df_all %>%
+  filter(sample %in% sample_map$sample) %>%
+  left_join(sample_map, by = "sample") %>%
+  mutate(sample = new_sample) %>%
+  select(-new_sample)
+
+
+```
+
+# Extract data for total rDNA
+
+```{r}
+#| echo: true
+#| warning: false
+
+bam_summary_file <- "F:\\Big Paper\\Processed data\\Fig3_Dosage and Transcriptome\\bam_summary_genome.csv"
+
+bam_summary <- fread(bam_summary_file)
+
+
+
+# =============================
+# 1. sample mapping
+# =============================
+sample_map <- tibble(
+  sample = c(
+    "Ras3",
+    "ML82",
+    "5A",
+    "5B_barcode19",
+    "6B",
+    "7B_barcode23"
+  ),
+  bam_sample = c(
+    "Ras3_q30",
+    "ML82_q30",
+    "05a_q30",
+    "05b_barcode19_q30",
+    "06b_q30",
+    "07b_barcode23_q30"
+  ),
+  new_sample = c(
+    "Ras3",
+    "ML82",
+    "HYC1",
+    "HYC2",
+    "HYC3",
+    "HYC4"
+  )
+)
+
+
+
+# =============================
+# 2. normalize by Total_Bases
+# =============================
+df_norm <- df_all %>%
+  filter(sample %in% sample_map$sample) %>%
+  left_join(sample_map, by = "sample") %>%
+  left_join(
+    bam_summary %>%
+      as_tibble() %>%
+      select(
+        bam_sample = Sample,
+        Total_Bases
+      ),
+    by = "bam_sample"
+  ) %>%
+  mutate(
+    Total_Bases = as.numeric(Total_Bases),
+    
+    # raw normalized value
+    normalized_raw = total_hits / Total_Bases,
+    
+    # easier for plotting: hits per Gb
+    normalized = total_hits / Total_Bases * 1e9,
+    
+    # species from motif name
+    species = case_when(
+      grepl("_dmel$", motif) ~ "dmel",
+      grepl("_dsim$", motif) ~ "dsim",
+      TRUE ~ NA_character_
+    ),
+    
+    # final sample name for plotting
+    sample = new_sample
+  )
+
+# =============================
+# 3. plot data
+# =============================
+sample_colors <- c(
+  "HYC1" = "#61649F",
+  "HYC2" = "#61649F",
+  "HYC3" = "#61649F",
+  "HYC4" = "#61649F",
+  "ML82" = "#ed556a",
+  "Ras3" = "#fb8b05"
+)
+
+motif_order <- c(
+  "18S_dmel", "28S_dmel",
+  "18S_dsim", "28S_dsim"
+)
+
+df_plot <- df_norm %>%
+  filter(
+    motif %in% motif_order,
+    !is.na(normalized),
+    is.finite(normalized)
+  ) %>%
+  filter(
+    !(sample == "ML82" & species != "dsim"),
+    !(sample == "Ras3" & species != "dmel")
+  ) %>%
+  mutate(
+    motif = factor(motif, levels = motif_order),
+    sample = factor(
+      sample,
+      levels = c("Ras3", "ML82", "HYC1", "HYC2", "HYC3", "HYC4")
+    )
+  )
+
+# Y-axis maximum
+y_max <- max(df_plot$normalized, na.rm = TRUE) * 1.1
+
+my_family <- "sans"
+
+# =============================
+# 4. plot
+# =============================
+p1 <- ggplot(df_plot, aes(x = sample, y = normalized, fill = sample)) +
+  geom_col(
+    width = 0.7,
+    colour = NA,
+    linewidth = 0.1
+  ) +
+  
+  facet_wrap(~motif, ncol = 4) +
+  
+  scale_fill_manual(values = sample_colors) +
+  
+  scale_y_continuous(
+    expand = c(0.05, 0),
+    limits = c(0, y_max),
+    breaks = pretty(c(0, y_max), n = 3),
+    minor_breaks = waiver(),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  
+  labs(
+    x = NULL,
+    y = "Total hits per Gb"
+  ) +
+  
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Facet labels
+    strip.text.x = element_text(
+      angle = 0,
+      hjust = 0.5,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 1, r = 0, b = 3, l = 0)
+    ),
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      angle = 0,
+      hjust = 0.5
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.y = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+    
+    # No legend
+    legend.position = "none",
+    
+    # Facet spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    strip.placement = "outside",
+    strip.switch.pad.grid = unit(0, "pt"),
+    strip.clip = "off",
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  )
+
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+p1_canvas <- p1 + ggview::canvas(180, 50, units="mm",dpi=900,bg="transparent")
+p1_canvas
+
+#ggsave( "Fig4A.pdf",p1,dpi=1200,units="mm",width=180, height=50)
+
+
+```
+
+# Extract data for rDNA quantification per X chromosome
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+sample_map <- tibble(
+  sample = c("Ras3","ML82","5A", "5B_barcode19","6B","7B_barcode23"),
+  new_sample = c("Ras3","ML82","HYC1", "HYC2","HYC3","HYC4")
+)
+
+df_rDNA <- df_all %>%
+  filter(sample %in% sample_map$sample) %>%
+  left_join(sample_map, by = "sample") %>%
+  mutate(sample = new_sample) %>%
+  select(-new_sample)
+
+
+df_norm <- df_rDNA %>%
+  group_by(sample) %>%
+  mutate(
+    # baseline
+    baseline_dmel = mean(total_hits[str_detect(motif, "^FBgn")], na.rm = TRUE),
+    baseline_dsim = mean(total_hits[str_detect(motif, "^LOC")], na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  filter(str_detect(motif, "^(18S|28S)")) %>%
+  
+  mutate(
+    species = case_when(
+      str_detect(motif, "dmel") ~ "dmel",
+      str_detect(motif, "dsim") ~ "dsim"
+    ),
+    rDNA_type = case_when(
+      str_detect(motif, "^18S") ~ "18S",
+      str_detect(motif, "^28S") ~ "28S"
+    ),
+    
+    normalized = case_when(
+      species == "dmel" ~ total_hits / baseline_dmel,
+      species == "dsim" ~ total_hits / baseline_dsim
+    )
+  )
+```
+
+## Plot the copy number per X chromosome
+
+```{r}
+#| echo: true
+#| warning: false
+
+# 🎨 自定义颜色（稍微优化一下更统一）
+sample_colors <- c(
+  "HYC1" = "#61649F",
+  "HYC2" = "#61649F",
+  "HYC3" = "#61649F",
+  "HYC4" = "#61649F",
+  "ML82" = "#ed556a",
+  "Ras3" = "#fb8b05"
+)
+
+
+
+# 🔥 motif顺序（关键）
+motif_order <- c(
+  "18S_dmel", "28S_dmel",
+  "18S_dsim", "28S_dsim"
+)
+
+df_plot <- df_norm %>%
+  # ❗去掉 NA / Inf
+  filter(!is.na(normalized), is.finite(normalized)) %>%
+  
+  # ❗控制 ML82 / Ras3
+  filter(
+    !(sample == "ML82" & species != "dsim"),
+    !(sample == "Ras3" & species != "dmel")
+  ) %>%
+  
+  # ❗设置顺序
+  mutate(
+    motif = factor(motif, levels = motif_order),
+    sample = factor(sample, levels = c("Ras3","ML82", "HYC1", "HYC2", "HYC3", "HYC4"))
+  )
+
+# Y-axis maximum number
+y_max <- max(df_plot$normalized, na.rm = TRUE) * 1.1
+
+my_family <- "sans"
+
+p2 <- ggplot(df_plot, aes(x = sample, y = normalized, fill = sample)) +
+  geom_col(
+    width = 0.7,
+    colour = NA,
+    linewidth = 0.1
+  ) +
+  
+  facet_wrap(~motif, ncol = 4) +
+  
+  scale_fill_manual(values = sample_colors) +
+  
+  scale_y_continuous(
+    expand = c(0.05, 0),
+    limits = c(0, y_max),
+    breaks = pretty(c(0, y_max), n = 3),
+    minor_breaks = waiver(),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  
+  labs(
+  x = NULL,
+  y = expression(Hits^rDNA / Hits^"mean of BUSCO genes")
+) +
+  
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Facet labels
+    strip.text.x = element_text(
+      angle = 0,
+      hjust = 0.5,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 1, r = 0, b = 3, l = 0)
+    ),
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      angle = 0,
+      hjust = 0.5
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.y = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+    
+    # No legend
+    legend.position = "none",
+    
+    # Facet spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    strip.placement = "outside",
+    strip.switch.pad.grid = unit(0, "pt"),
+    strip.clip = "off",
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  )
+
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+p2_canvas <- p2 + ggview::canvas(180, 50, units="mm",dpi=900,bg="transparent")
+p2_canvas
+
+#ggsave( "Fig4B.pdf",p2,dpi=1200,units="mm",width=180, height=50)
+```
+
+# Calculate the rRNA/rDNA ratio
+
+## Extract rRNA and rDNA counts
+
+```{r}
+#| echo: true
+#| warning: false
+
+sample_map_DNA <- tibble(
+  sample = c("Ras3","ML82","5A", "5B_barcode19","6B","7B_barcode23"),
+  new_sample = c("Ras3","ML82","HYC1", "HYC2","HYC3","HYC4")
+)
+
+df_rDNA <- df_all %>%
+  # ❗只保留你指定的样本
+  filter(sample %in% sample_map_DNA$sample) %>%
+  
+  # ❗精确映射
+  left_join(sample_map_DNA, by = "sample") %>%
+  
+  mutate(sample = new_sample) %>%
+  
+  select(-new_sample)
+
+
+
+sample_map_RNA <- tibble(
+  sample_core = c("Ras3", "ML82", "5A", "5B", "6B", "7B"),
+  new_sample  = c("Ras3", "ML82", "HYC1", "HYC2", "HYC3", "HYC4")
+)
+
+df_rRNA <- df_all %>%
+  # ❗只选 transcriptome
+  filter(str_detect(sample, "transcriptome")) %>%
+  
+  mutate(
+    # 🔥 提取 core
+    sample_core = str_extract(sample, "^[^_]+"),
+    
+    # 🔥 提取 replicate
+    rep = str_extract(sample, "rep\\d+")
+  ) %>%
+  
+  # 🔥 映射
+  left_join(sample_map_RNA, by = "sample_core") %>%
+  
+  mutate(
+    sample = paste0(new_sample, "_", rep)
+  ) %>%
+  
+  select(-sample_core, -new_sample, -rep)
+
+
+# Extract to a summary table
+df_merge <- df_rRNA %>%
+  # 🧩 提取对应 DNA 的 sample（去掉 _repX）
+  mutate(sample_dna = str_remove(sample, "_rep\\d+")) %>%
+  
+  # 🧬 提取 RNA
+  select(sample, sample_dna, motif, RNA = total_hits) %>%
+  
+  # 🔗 和 DNA 对齐
+  left_join(
+    df_rDNA %>%
+      select(sample, motif, DNA = total_hits),
+    by = c("sample_dna" = "sample", "motif" = "motif")
+  ) %>%
+  
+  # 🧹 整理输出
+  select(sample, motif, RNA, DNA)
+```
+
+## Calculate rRNA ratio
+
+```{r}
+#| echo: true
+#| warning: false
+
+df_result <- df_merge %>%
+  filter(str_detect(motif, "^(18S|28S)")) %>%
+  
+  mutate(
+    rDNA_type = str_extract(motif, "^(18S|28S)"),
+    species   = str_extract(motif, "dmel|dsim"),
+    
+    RNA_over_DNA = if_else(DNA == 0, 0, RNA / DNA)
+  ) %>%
+  
+  group_by(sample, rDNA_type) %>%
+  
+  mutate(
+    RNA_percentage = RNA / sum(RNA, na.rm = TRUE),
+    
+    # 🔥 正确处理（重点）
+    relative_RNA_percentage = {
+      total <- sum(RNA_over_DNA, na.rm = TRUE)
+      if (total == 0) {
+        rep(0, n())
+      } else {
+        RNA_over_DNA / total
+      }
+    }
+  ) %>%
+  
+  ungroup()
+```
+
+## Plot the result of RNA percentage
+
+## RNA percentage
+
+```{r}
+#| echo: true
+#| warning: false
+
+df_plot <- df_result %>%
+  mutate(sample_base = stringr::str_remove(sample, "_rep\\d+")) %>%
+  
+  group_by(sample_base, rDNA_type, species) %>%
+  summarise(
+    RNA_percentage = mean(RNA_percentage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sample_levels <- c("Ras3", "ML82", "HYC1", "HYC2", "HYC3", "HYC4")
+
+df_plot <- df_plot %>%
+  mutate(sample_base = factor(sample_base, levels = sample_levels))
+
+my_family <- "sans"
+
+p3 <- ggplot(df_plot, aes(
+  x = sample_base,
+  y = RNA_percentage,
+  fill = species
+)) +
+  geom_col(
+    width = 0.7,
+    colour = NA,
+    linewidth = 0.1
+  ) +
+  
+  facet_wrap(~rDNA_type, ncol = 2) +
+  
+  scale_fill_manual(
+  values = c(
+    "dmel" = "#0eb0c9",
+    "dsim" = "#f2481b"
+    ),
+    labels = c(
+      "dmel" = "D. mel",
+      "dsim" = "D. sim"
+    ),
+    name = "Source"
+  ) +
+  
+  
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0.05, 0),
+    breaks = seq(0, 1, by = 0.5),
+    minor_breaks = seq(0, 1, by = 0.1),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  
+  labs(
+    x = NULL,
+    y = "RNA Percentage"
+  ) +
+  
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Facet labels
+    strip.text.x = element_text(
+      angle = 0,
+      hjust = 0.5,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 1, r = 0, b = 3, l = 0)
+    ),
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      angle = 45,
+      hjust = 1,
+      vjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.y = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      face ="italic"
+    ),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 0, l = 2)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    # Facet spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    strip.placement = "outside",
+    strip.switch.pad.grid = unit(0, "pt"),
+    strip.clip = "off",
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  ) +
+  guides(
+    fill = guide_legend(
+      keywidth = unit(6, "pt"),
+      keyheight = unit(6, "pt"),
+      ncol = 1,
+      bycol = TRUE,
+      label.position = "right",
+      label.hjust = 0,
+      override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+    )
+  )
+
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+p3_canvas <- p3 + ggview::canvas(75, 50, units="mm",dpi=900,bg="transparent")
+p3_canvas
+
+#ggsave( "Fig4C.pdf",p3,dpi=1200,units="mm",width=75, height=50)
+
+```
+
+## Plot the result of relative RNA percentage
+
+```{r}
+#| echo: true
+#| warning: false
+
+df_plot_rel <- df_result %>%
+  mutate(sample_base = str_remove(sample, "_rep\\d+")) %>%
+  
+  group_by(sample_base, rDNA_type, species) %>%
+  summarise(
+    relative_RNA_percentage = mean(relative_RNA_percentage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sample_levels <- c("Ras3", "ML82", "HYC1", "HYC2", "HYC3", "HYC4")
+
+df_plot_rel <- df_plot_rel %>%
+  mutate(sample_base = factor(sample_base, levels = sample_levels))
+
+p4 <- ggplot(df_plot_rel, aes(
+  x = sample_base,
+  y = relative_RNA_percentage,
+  fill = species
+)) +
+  geom_col(
+    width = 0.7,
+    colour = "grey20",
+    linewidth = 0.2
+  ) +
+  
+  facet_wrap(~rDNA_type, ncol = 2) +
+  
+   scale_fill_manual(values = c("dmel" = "#0D6D98","dsim" = "#FF3636"),name="Source") +
+  
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0.05, 0),
+    breaks = seq(0, 1, by = 0.5),
+    minor_breaks = seq(0, 1, by = 0.1),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  
+  labs(
+    x = NULL,
+    y = "Relative RNA Percentage"
+  ) +
+  
+  theme_bw(base_size = 6) +
+  theme(
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background  = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    panel.grid = element_blank(),
+    
+    panel.spacing.x = unit(0.6, "lines"),
+    panel.spacing.y = unit(0.5, "lines"),
+    
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    
+    strip.text = element_text(size = 7, face = "bold"),
+    axis.text.x = element_text(size = 5.5, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 5.5),
+    axis.title.y = element_text(size = 7),
+    
+    axis.ticks = element_line(linewidth = 0.2),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    axis.minor.ticks.length = unit(0.8, "pt"),
+    
+    # 新增图例位置（右上角）
+    legend.justification = c("right", "top"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = -2),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = -2),
+    legend.title = element_text(size = 6, color = "black"),
+    legend.text  = element_text(size = 6, color = "black"),
+    legend.key.width  = unit(5, "pt"),
+    legend.key.height = unit(5, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.spacing.x = unit(0.5, "pt"),
+    strip.clip="off",
+    
+    plot.margin = margin(4, 2, 0, 2)
+  )
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+p4_canvas <- p4 + ggview::canvas(75, 50, units="mm",dpi=900,bg="transparent")
+p4_canvas
+
+#ggsave( "relative rDNA percentage.png",p3,dpi=1200,units="mm",width=75, height=50)
+
+```
+
+# Check the ratio between *D. mel* and *D. sim*
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(grid)
+
+# =============================
+# 1. 计算 RNA / DNA ratio
+# =============================
+df_ratio <- df_result %>%
+  
+  select(sample, rDNA_type, species, RNA, DNA) %>%
+  
+  pivot_wider(
+    names_from = species,
+    values_from = c(RNA, DNA),
+    names_sep = "_"
+  ) %>%
+  
+  mutate(
+    RNA_ratio = RNA_dmel / RNA_dsim,
+    DNA_ratio = DNA_dmel / DNA_dsim
+  ) %>%
+  
+  select(sample, rDNA_type, RNA_ratio, DNA_ratio) %>%
+  
+  arrange(sample, rDNA_type)
+
+# =============================
+# 2. 自定义坐标轴
+# =============================
+x_limits <- c(-2, 2)
+y_limits <- c(-7, 7)
+
+x_breaks <- seq(x_limits[1], x_limits[2], by = 1)
+y_breaks <- seq(y_limits[1], y_limits[2], by = 2)
+
+x_labels <- x_breaks
+y_labels <- y_breaks
+
+# =============================
+# 3. 计算每组平均值
+#    兼容 HYC1_rep1 / 5A_rep1 等命名
+# =============================
+df_ratio_mean <- df_ratio %>%
+  mutate(
+    sample_group = str_remove(sample, "_rep.*"),
+    sample_group = case_when(
+      sample_group == "5A" ~ "HYC1",
+      sample_group == "5B" ~ "HYC2",
+      sample_group == "6B" ~ "HYC3",
+      sample_group == "7B" ~ "HYC4",
+      TRUE ~ sample_group
+    )
+  ) %>%
+  filter(
+    sample_group %in% c("HYC1", "HYC2", "HYC4"),
+    !is.na(RNA_ratio),
+    !is.na(DNA_ratio),
+    is.finite(RNA_ratio),
+    is.finite(DNA_ratio),
+    RNA_ratio > 0,
+    DNA_ratio > 0
+  ) %>%
+  group_by(sample_group, rDNA_type) %>%
+  summarise(
+    RNA_ratio = mean(RNA_ratio, na.rm = TRUE),
+    DNA_ratio = mean(DNA_ratio, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    log2_DNA_ratio  = log2(DNA_ratio),
+    log2_rRNA_ratio = log2(RNA_ratio),
+    sample_group = factor(
+      sample_group,
+      levels = c("HYC1", "HYC2", "HYC4")
+    )
+  )
+
+# 检查：这里不能是 0 行
+print(df_ratio_mean)
+
+# =============================
+# 4. 如果 df_ratio_mean 为空，提前报错
+# =============================
+if (nrow(df_ratio_mean) == 0) {
+  stop(
+    "df_ratio_mean is empty. Check sample names with unique(df_ratio$sample) and rDNA_type/species values."
+  )
+}
+
+# =============================
+# 5. 绘图
+# =============================
+my_family <- "sans"
+
+p5 <- ggplot(
+  df_ratio_mean,
+  aes(
+    x = log2_DNA_ratio,
+    y = log2_rRNA_ratio,
+    colour = sample_group
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.25,
+    colour = "grey60"
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.25,
+    colour = "grey60"
+  ) +
+  geom_point(
+    size = 1.6,
+    alpha = 0.9,
+    stroke = 0.2
+  ) +
+  
+  facet_wrap(~ rDNA_type, ncol = 2) +
+  
+
+  
+  scale_colour_manual(
+    values = c(
+      "HYC1" = "#0072B2",
+      "HYC2" = "#fb8b05",
+      "HYC4" = "#ed556a"
+    ),
+    breaks = c("HYC1", "HYC2", "HYC4"),
+    name = "Sample"
+  ) +
+  
+  scale_x_continuous(
+    limits = x_limits,
+    breaks = x_breaks,
+    labels = x_labels,
+    minor_breaks = seq(x_limits[1], x_limits[2], by = 0.5),
+    expand = expansion(mult = c(0.05, 0.05)),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  
+  scale_y_continuous(
+    limits = y_limits,
+    breaks = y_breaks,
+    labels = y_labels,
+    minor_breaks = seq(y_limits[1], y_limits[2], by = 0.5),
+    expand = expansion(mult = c(0.05, 0.05)),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  
+  coord_fixed(ratio = 1) +
+  
+  labs(
+    x = expression(log[2]("rDNA " * italic("D. mel") * "/" * italic("D. sim"))),
+    y = expression(log[2]("rRNA " * italic("D. mel") * "/" * italic("D. sim")))
+  ) +
+  
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Facet labels
+    strip.text.x = element_text(
+      angle = 0,
+      hjust = 0.5,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 1, r = 0, b = 3, l = 0)
+    ),
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "plain",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.y = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 0, l = 2)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    # Facet spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    strip.placement = "outside",
+    strip.switch.pad.grid = unit(0, "pt"),
+    strip.clip = "off",
+    
+    # Plot margin
+    plot.margin = margin(t = 0, r = 2, b = 0, l = 2),
+    
+    # Keep square panels
+    aspect.ratio = 1
+  ) +
+  
+  guides(
+    colour = guide_legend(
+      keywidth = unit(6, "pt"),
+      keyheight = unit(6, "pt"),
+      ncol = 1,
+      bycol = TRUE,
+      label.position = "right",
+      label.hjust = 0,
+      override.aes = list(
+        alpha = 0.95,
+        size = 1.8
+      )
+    )
+  )
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+p5_canvas <- p5 + ggview::canvas(75, 50, units="mm",dpi=900,bg="transparent")
+p5_canvas
+
+#ggsave( "Fig4D.pdf",p5,dpi=1200,units="mm",width=75, height=50)
+
+```

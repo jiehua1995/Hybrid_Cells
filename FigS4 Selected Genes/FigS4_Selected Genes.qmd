@@ -1,0 +1,367 @@
+---
+title: "FigS5 Genomic Coverage of Selected Genes"
+author: "Jie Hua"
+date: 2026-04-06
+lang: en
+date-modified: 2026-04-06
+keywords: ["Genomic Coverage","Hybrid Cells"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: true
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load the required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+```
+
+# Read the basic information
+
+Read the genomic coverage
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Genomic coverage of all annotated genes(already normalized)
+#genomic_coverage_file="F:\\Big Paper\\Processed data\\Fig5_Dosage and Transcriptome\\genome_coverage_matrix.csv"
+
+
+# File
+folder <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome\\"
+
+genomic_coverage_file=paste0(folder, "genome_coverage_matrix.csv")
+
+
+genomic_coverage <- fread(genomic_coverage_file)
+
+cols <- c("Gene", "5A", "5B_P2", "6B","7B_P2","ML82","Ras3")
+genomic_coverage <- genomic_coverage[, ..cols]
+colnames(genomic_coverage) <- c("Gene", "HYC1", "HYC2", "HYC3","HYC4","ML82","Ras3")
+
+```
+
+Read the orthogroup information
+
+```{r}
+#| echo: true
+#| warning: false
+
+orthogroup_gene_file=paste0(folder, "orthofinder_gene.csv")
+
+orthogroup_gene <- fread(orthogroup_gene_file)
+
+cols2 <- c("Orthogroup","isoquant_split.mel.pep.nostar","isoquant_split.sim.pep.nostar")
+orthogroup_gene <- orthogroup_gene[, ..cols2]
+```
+
+# Define selected genes
+
+```{r}
+#| echo: true
+#| warning: false
+
+labels <- c("Hmr","Lhr","Boh1","Boh2","Nlp","Nph","gfzf","Nup98-96","cid","msl-2","mof","msl-3","mle")
+
+mel_id <- c("FBgn0001206","FBgn0034217","FBgn0053213","FBgn0032354","FBgn0016685","FBgn0039735","FBgn0250732","FBgn0039120","FBgn0040477","FBgn0005616","FBgn0014340","FBgn0002775","FBgn0002774")
+
+```
+
+# Prepare the table
+
+```{r}
+#| echo: true
+#| warning: false
+
+res <- orthogroup_gene %>%
+  filter(!is.na(isoquant_split.mel.pep.nostar)) %>%
+  separate_rows(isoquant_split.mel.pep.nostar, sep = ",") %>%  # 拆开mel列
+  filter(isoquant_split.mel.pep.nostar %in% mel_id) %>%       # 只保留目标mel_id
+  mutate(isoquant_split.mel.pep.nostar = factor(
+    isoquant_split.mel.pep.nostar, levels = mel_id
+  )) %>%                                                     # 指定排序顺序
+  arrange(isoquant_split.mel.pep.nostar) %>%                 # 排序
+  distinct(
+    isoquant_split.mel.pep.nostar,
+    isoquant_split.sim.pep.nostar
+  )
+
+
+final_df <- tibble(
+  label = labels,
+  mel_id = mel_id
+) %>%
+  left_join(
+    res %>%
+      mutate(
+        mel_id = as.character(isoquant_split.mel.pep.nostar),
+        sim_id = isoquant_split.sim.pep.nostar
+      ) %>%
+      dplyr::select(mel_id, sim_id),
+    by = "mel_id"
+  )
+```
+
+# Prepare coverage table
+
+```{r}
+#| echo: true
+#| warning: false
+
+sample_cols <- c("Ras3","ML82","HYC1", "HYC2", "HYC3","HYC4")
+
+# 1. 取 mel 的 coverage
+mel_cov <- final_df %>%
+  dplyr::select(label, mel_id) %>%
+  dplyr::left_join(
+    genomic_coverage %>%
+      tibble::as_tibble() %>%
+      dplyr::rename(mel_id = Gene),
+    by = "mel_id"
+  ) %>%
+  dplyr::select(label, dplyr::all_of(sample_cols)) %>%
+  dplyr::rename_with(~ paste0(.x, "_mel"), dplyr::all_of(sample_cols))
+
+# 2. 取 sim 的 coverage
+sim_cov <- final_df %>%
+  dplyr::select(label, sim_id) %>%
+  dplyr::left_join(
+    genomic_coverage %>%
+      tibble::as_tibble() %>%
+      dplyr::rename(sim_id = Gene),
+    by = "sim_id"
+  ) %>%
+  dplyr::select(label, dplyr::all_of(sample_cols)) %>%
+  dplyr::rename_with(~ paste0(.x, "_sim"), dplyr::all_of(sample_cols))
+
+# 3. 合并 mel 和 sim
+cov_table <- mel_cov %>%
+  dplyr::left_join(sim_cov, by = "label")
+
+# 4. 调整列顺序：5A_mel, 5A_sim, 5B_mel, 5B_sim ...
+ordered_cols <- as.vector(rbind(
+  paste0(sample_cols, "_mel"),
+  paste0(sample_cols, "_sim")
+))
+
+# 5. 转矩阵
+cov_matrix <- cov_table %>%
+  dplyr::select(label, dplyr::all_of(ordered_cols)) %>%
+  tibble::column_to_rownames("label") %>%
+  as.matrix()
+```
+
+# Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+my_family="sans"
+
+sample_order <- sample_cols
+label_order <- rownames(cov_matrix)
+
+plot_df <- cov_matrix %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("label") %>%
+  tidyr::pivot_longer(
+    cols = -label,
+    names_to = "sample_species",
+    values_to = "coverage"
+  ) %>%
+  tidyr::separate(
+    sample_species,
+    into = c("sample", "species"),
+    sep = "_(?=[^_]+$)"
+  ) %>%
+  dplyr::mutate(
+    coverage_group = factor(
+    ifelse(coverage > 0, "Present", "Absent"),
+    levels = c("Absent", "Present")
+    ),
+    sample = factor(sample, levels = sample_order),
+    species = factor(
+      species,
+      levels = c("mel", "sim"),
+      labels = c("D. mel", "D. sim")
+    ),
+    label = factor(label, levels = rev(label_order))
+  )
+
+p <- ggplot(plot_df, aes(x = sample, y = label, fill = coverage_group)) +
+  geom_tile(color = "black", linewidth = 0.1) +
+  facet_grid(. ~ species) +
+  scale_fill_manual(
+    values = c("Absent" = "#ed556a", "Present" = "#61649F"),
+    name = "Presence"
+  ) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  labs(x = "Samples", y = "Genes") +
+  theme_bw(base_family = "sans")+
+  theme(
+      # Transparent backgrounds
+      plot.background = element_rect(fill = "transparent", color = NA),
+      panel.background = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      strip.background = element_rect(fill = "transparent", color = NA),
+      
+      # Grid
+      panel.grid = element_blank(),
+      
+      # Border
+      panel.border = element_rect(
+        color = "black",
+        fill = NA,
+        linewidth = 0.1
+      ),
+      
+      # Avoid double-thick borders
+      axis.line = element_blank(),
+      
+      # Facet labels
+      strip.text.x = element_text(
+        angle = 0,
+        hjust = 0.5,
+        size = 6,
+        family = my_family,
+        color = "black",
+        face="italic",
+        margin = margin(t = 1, r = 0, b = 3, l = 0)
+      ),
+      strip.text.y.left = element_text(
+        angle = 0,
+        hjust = 1,
+        size = 6,
+        family = my_family,
+        color = "black",
+        face="italic",
+        margin = margin(t = 0, r = 3, b = 0, l = 1)
+      ),
+      
+      # Axis text
+      axis.text.x = element_text(
+        size = 6,
+        color = "black",
+        family = my_family
+      ),
+      axis.text.y = element_text(
+        size = 6,
+        color = "black",
+        family = my_family,
+        face="italic"
+      ),
+      
+      # Axis titles
+      axis.title.x = element_text(
+        size = 7,
+        color = "black",
+        family = my_family
+      ),
+      axis.title.y = element_text(
+        size = 7,
+        color = "black",
+        family = my_family
+      ),
+      
+      # Major ticks
+      axis.ticks.x = element_line(
+        linewidth = 0.2,
+        color = "black"
+      ),
+      axis.ticks.y = element_line(
+        linewidth = 0.2,
+        color = "black"
+      ),
+      axis.ticks.length = unit(1.5, "pt"),
+      
+      # Minor ticks
+      axis.minor.ticks.x = element_line(
+        linewidth = 0.1,
+        color = "black"
+      ),
+      axis.minor.ticks.y = element_line(
+        linewidth = 0.1,
+        color = "black"
+      ),
+      axis.minor.ticks.length.x = unit(0.8, "pt"),
+      axis.minor.ticks.length.y = unit(0.8, "pt"),
+      
+      # Compact legend
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(
+        size = 6,
+        color = "black",
+        family = my_family,
+        margin = margin(t = 0, r = 0, b = 0, l = 2)
+      ),
+      legend.key.size = unit(6, "pt"),
+      legend.key.width = unit(6, "pt"),
+      legend.key.height = unit(6, "pt"),
+      legend.key.spacing.x = unit(1, "pt"),
+      legend.key.spacing.y = unit(1, "pt"),
+      
+      legend.spacing.x = unit(1, "pt"),
+      legend.spacing.y = unit(1, "pt"),
+      legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      legend.box.spacing = unit(2, "pt"),
+      
+      # Facet spacing
+      panel.spacing.x = unit(0.2, "lines"),
+      panel.spacing.y = unit(0.4, "lines"),
+      strip.placement = "outside",
+      strip.switch.pad.grid = unit(0, "pt"),
+      strip.clip = "off",
+      
+      # Plot margin
+      plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+    )+
+  guides(
+      fill = guide_legend(
+        keywidth = unit(6, "pt"),
+        keyheight = unit(6, "pt"),
+        ncol = 1,
+        bycol = TRUE,
+        label.position = "right",
+        label.hjust = 0,
+        override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+      )
+    )
+```
+
+```{r}
+#| echo: true
+#| warning: false
+p_canvas <- p+ggview::canvas(150,80,units="mm",dpi=900,bg="transparent")
+p_canvas
+#ggsave("figS4.pdf",p,width=150,height=80,units="mm",dpi=900,bg="transparent")
+```

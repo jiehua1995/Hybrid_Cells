@@ -1,6 +1,8 @@
-# *Drosophila* Hybrid Cell Analysis
+# Constrained resolution of genomic incompatibility in hybrid *Drosophila* cell lines
 
-This repository contains R-based Quarto notebooks used for data analysis and figure generation for a study of *Drosophila melanogaster*–*Drosophila simulans* hybrid cell lines.
+
+
+This repository contains R-based Quarto notebooks used for data analysis and figure generation for a study of *Drosophila melanogaster*  x *Drosophila simulans* hybrid cell lines.
 
 ## Repository status
 

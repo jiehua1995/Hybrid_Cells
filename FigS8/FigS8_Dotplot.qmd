@@ -1,0 +1,1528 @@
+---
+title: "Fig. S8 Dot Plot"
+author: "Jie Hua"
+date: 2026-03-09
+lang: en
+date-modified: 2026-03-09
+keywords: ["Genomic Coverage","Transcriptome","Comparison","Dot plot"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: false
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(data.table)
+library(stringr)
+library(pbapply)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpointdensity)
+library(scales)
+library(grid)
+library(patchwork)
+```
+
+# Load the files
+
+## Define a folder
+
+```{r}
+#| echo: true
+#| warning: false
+
+#folder_path <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome"
+folder_path <- "F:\\Big Paper\\Processed data\\Fig3_Dosage and Transcriptome"
+```
+
+## Load the orthofinder matrix generated with protein-protein.
+
+```{r}
+#| echo: true
+#| warning: false
+
+orthofinder <- fread(file=paste0(folder_path,"\\dmel_dsim_orthofinder\\Orthogroups.tsv"),header = T,sep = "\t",stringsAsFactors = FALSE,check.names = FALSE)
+```
+
+## Load the annotation GTF from IsoQuant
+
+```{r}
+#| echo: true
+#| warning: false
+
+isoquant_transcript_gtf <- paste0(folder_path,"\\transcriptome\\All.extended_annotation.gtf")
+
+```
+
+## Load the genomic coverage table
+
+```{r}
+#| echo: true
+#| warning: false
+
+genomic_coverage <- paste0(folder_path,"\\genomic\\genome_coverage_matrix.csv")
+```
+
+## Load the transcriptome table
+
+```{r}
+#| echo: true
+#| warning: false
+
+transcriptome_file <- paste0(folder_path,"\\transcriptome\\transcriptome.csv")
+```
+
+## Load the comparison table
+
+```{r}
+#| echo: true
+#| warning: false
+
+comparison_file <- paste0(folder_path,"\\transcriptome\\comparison_sample_means.csv")
+
+```
+
+# Proceed orthofinder result
+
+Orthofinder found protein-protein level orthogroups. Convert it to transcript-transcript and gene-gene level.
+
+## Convert the orthofinder result to transcript level
+
+```{r}
+#| echo: true
+#| warning: false
+
+cat("Convert Protein-Protein relationship to Transcript-Transcript level.")
+
+orthofinder_transcript <- orthofinder
+
+cols_to_clean <- colnames(orthofinder_transcript)[-1]
+
+for(col in cols_to_clean){
+  orthofinder_transcript[[col]] <- pbsapply(orthofinder_transcript[[col]], function(x){
+    # If NA, just return NA.
+    if(is.na(x) || trimws(x) == "") return(NA_character_)
+    # Split the protein IDs.
+    ids <- unlist(strsplit(x, ",\\s*"))
+    # Remove the space
+    ids <- trimws(ids)
+    # Remove the ".p" postfix
+    ids <- str_remove(ids, "\\.p\\d+$")
+    # Keep the unique IDs
+    ids <- unique(ids)
+    # Put the IDs back
+    paste(ids, collapse = ", ")
+  })
+}
+```
+
+## Convert the orthofinder result to gene level
+
+Read the GTF file and prepare the mapping relationship.
+
+```{r}
+#| echo: true
+#| warning: false
+
+cat("The GTF file is",isoquant_transcript_gtf)
+
+gtf <- data.table::fread(
+  isoquant_transcript_gtf,
+  sep = "\t",
+  header = FALSE
+)
+
+colnames(gtf) <- c("chr","source","feature","start","end","score","strand","frame","attribute")
+
+# Only keep transcript rows
+gtf_transcript <- gtf %>%
+  dplyr::filter(feature == "transcript")
+
+# Extract transcript_id, gene_id, chr, start
+gtf_map <- gtf_transcript[, .(
+  transcript_id = sub('.*transcript_id "([^"]+)".*', '\\1', attribute),
+  gene_id       = sub('.*gene_id "([^"]+)".*', '\\1', attribute),
+  chr           = chr,
+  start         = start
+)]
+
+# Build mapping
+tx2gene <- setNames(gtf_map$gene_id, gtf_map$transcript_id)
+tx2chr  <- setNames(gtf_map$chr, gtf_map$transcript_id)
+```
+
+Convert the transcript-transcript relationship to gene level.
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Generic converter
+convert_cell <- function(cell_value, map){
+
+  if(is.na(cell_value) || trimws(cell_value) == "")
+    return(NA_character_)
+
+  # Split transcript list
+  tx_ids <- unlist(strsplit(cell_value, ",\\s*"))
+  tx_ids <- trimws(tx_ids)
+
+  # Map values
+  values <- map[tx_ids]
+  values <- values[!is.na(values)]
+
+  # Keep unique
+  values <- unique(values)
+
+  if(length(values) == 0)
+    return(NA_character_)
+
+  paste(values, collapse = ", ")
+}
+
+
+orthofinder_gene <- orthofinder_transcript
+orthofinder_chr  <- orthofinder_transcript
+orthofinder_location  <- orthofinder_transcript
+
+cols_to_convert <- colnames(orthofinder_transcript)[-1]
+
+for(col in cols_to_convert){
+
+  cat("Processing column:", col, "\n")
+
+  # transcript -> gene
+  orthofinder_gene[[col]] <- pbsapply(
+    orthofinder_transcript[[col]],
+    convert_cell,
+    map = tx2gene
+  )
+
+  # transcript -> chr
+  orthofinder_chr[[col]] <- pbsapply(
+    orthofinder_transcript[[col]],
+    convert_cell,
+    map = tx2chr
+  )
+}
+```
+
+Get the common chromosomes
+
+```{r}
+#| echo: true
+#| warning: false
+
+get_common_chr <- function(chr1, chr2){
+  
+  if(is.na(chr1) || is.na(chr2))
+    return(NA_character_)
+  # split multiple chromosomes
+  c1 <- unlist(strsplit(chr1, ",\\s*"))
+  c2 <- unlist(strsplit(chr2, ",\\s*"))
+  # remove species suffix (_mel / _sim etc.)
+  c1 <- sub("_.*$", "", c1)
+  c2 <- sub("_.*$", "", c2)
+  # intersection
+  common <- intersect(c1, c2)
+  if(length(common) == 0)
+    return(NA_character_)
+  paste(unique(common), collapse = ", ")
+}
+
+orthofinder_chr$common <- pbmapply(
+  get_common_chr,
+  orthofinder_chr[[2]],
+  orthofinder_chr[[3]],
+  SIMPLIFY = TRUE
+)
+```
+
+# Save or load the RData
+
+```{r}
+#| echo: true
+#| warning: false
+
+save.image(file = "dotplot.RData")
+load("dotplot.RData")
+```
+
+# Plot for genomic coverage
+
+I already generated the **genome_coverage_matrix.csv** before.
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Read the genomic coverage information
+expr <- read.csv(genomic_coverage,stringsAsFactors=FALSE,check.names=FALSE)
+samples <- colnames(expr)[-1]
+n_samples <- length(samples)
+draft <- data.frame(
+  Orthogroup = orthofinder_gene$Orthogroup,
+  check.names = FALSE
+)
+
+# Prepare a table
+for (s in samples) {
+  draft[[paste0(s, "_mel")]] <- orthofinder_gene$isoquant_split.mel.pep.nostar
+  draft[[paste0(s, "_sim")]] <- orthofinder_gene$isoquant_split.sim.pep.nostar
+}
+
+# Define a function to calculate the sum level
+get_expr_sum <- function(gene_string, sample_name) {
+  if (is.na(gene_string) || trimws(gene_string) == "")
+    return(NA_real_)
+  genes <- unlist(strsplit(gene_string, ",\\s*"))
+  genes <- trimws(genes)
+  genes <- unique(genes)
+  idx <- match(genes, expr$Gene)
+  idx <- idx[!is.na(idx)]
+  if (length(idx) == 0)
+    return(NA_real_)
+  sum(expr[idx, sample_name])
+}
+
+# Fill the values
+for (s in samples) {
+  # mel columns
+  draft[[paste0(s, "_mel")]] <- pbsapply(
+    draft[[paste0(s, "_mel")]],
+    get_expr_sum,
+    sample_name = s
+  )
+  # sim columns
+  draft[[paste0(s, "_sim")]] <- pbsapply(
+    draft[[paste0(s, "_sim")]],
+    get_expr_sum,
+    sample_name = s
+  )
+}
+
+# Remove those orthogroups that only exist in one species
+og_with_na <- orthofinder_gene$Orthogroup[
+  !complete.cases(orthofinder_gene)
+]
+draft_clean <- draft[!draft$Orthogroup %in% og_with_na, ]
+
+# Convert to long format
+long_df <- draft_clean %>%
+  pivot_longer(
+    cols = -Orthogroup,
+    names_to = c("Sample", "Species"),
+    names_sep = "_",
+    values_to = "Expression"
+  ) %>%
+  mutate(Expression = as.numeric(Expression)) %>%
+  pivot_wider(
+    names_from = Species,
+    values_from = Expression,
+    values_fn = sum
+  )
+long_df$mel[is.na(long_df$mel)] <- 0
+long_df$sim[is.na(long_df$sim)] <- 0
+
+# Plot
+long_df <- subset(long_df, Sample %in% c("5A","6B","5B","7B","Ras3","ML82"))
+max_val_log2 <- max(log2(c(long_df$mel, long_df$sim) + 1), na.rm = TRUE)
+max_val_log2 <- max_val_log2 * 1.05
+```
+
+Add chromosome information
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+
+# =========================
+# 1. Prepare data
+# =========================
+long_df_chr <- merge(
+  long_df,
+  orthofinder_chr[, c("Orthogroup", "common")],
+  by = "Orthogroup",
+  all.x = TRUE
+)
+
+long_df_chr <- long_df_chr %>%
+  filter(!(mel == 0 & sim == 0))
+
+# Rename maps
+sample_map <- c(
+  "Ras3" = "Ras3",
+  "ML82" = "ML82",
+  "5A"   = "HYC1",
+  "5B"   = "HYC2",
+  "6B"   = "HYC3",
+  "7B"   = "HYC4"
+)
+
+chr_map <- c(
+  "chr2L" = "2L",
+  "chr2R" = "2R",
+  "chr3L" = "3L",
+  "chr3R" = "3R",
+  "chrX"  = "X",
+  "chr4"  = "4"
+)
+
+sample_levels <- unname(sample_map)
+chr_levels <- unname(chr_map)
+
+long_df_chr <- long_df_chr %>%
+  filter(!is.na(common)) %>%
+  filter(Sample %in% names(sample_map)) %>%
+  filter(common %in% names(chr_map)) %>%
+  mutate(
+    Sample = recode(Sample, !!!sample_map),
+    common = recode(common, !!!chr_map)
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+# =========================
+# 2. Classification
+# =========================
+signal_cutoff <- 0.2
+
+long_df_chr <- long_df_chr %>%
+  mutate(
+    x_log2 = log2(mel + 1),
+    y_log2 = log2(sim + 1),
+    total_expr = mel + sim,
+    mel_prop = if_else(total_expr > 0, mel / total_expr, NA_real_),
+    sim_prop = if_else(total_expr > 0, sim / total_expr, NA_real_),
+    change_class = case_when(
+      mel_prop > 0.7 ~ "Dmel bias",
+      mel_prop < 0.3 ~ "Dsim bias",
+      TRUE           ~ "No bias"
+    )
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+# =========================
+# 3. Summary stats
+# =========================
+stat_df <- long_df_chr %>%
+  group_by(Sample, common) %>%
+  summarise(
+    n_total = n(),
+    n_no_bias = sum(change_class == "No bias", na.rm = TRUE),
+    n_dmel    = sum(change_class == "Dmel bias", na.rm = TRUE),
+    n_dsim    = sum(change_class == "Dsim bias", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_no_bias = scales::percent(n_no_bias / n_total, accuracy = 0.1),
+    p_dmel    = scales::percent(n_dmel / n_total, accuracy = 0.1),
+    p_dsim    = scales::percent(n_dsim / n_total, accuracy = 0.1)
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+max_val_log2 <- max(
+  c(long_df_chr$x_log2, long_df_chr$y_log2),
+  na.rm = TRUE
+)
+
+bar_df <- stat_df %>%
+  select(Sample, common, n_total, n_no_bias, n_dmel, n_dsim) %>%
+  pivot_longer(
+    cols = c(n_no_bias, n_dmel, n_dsim),
+    names_to = "change_class",
+    values_to = "n"
+  ) %>%
+  mutate(
+    change_class = recode(
+      change_class,
+      n_no_bias = "No bias",
+      n_dmel    = "Dmel bias",
+      n_dsim    = "Dsim bias"
+    )
+  ) %>%
+  group_by(Sample, common) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels),
+    change_class = factor(change_class, levels = c("No bias", "Dmel bias", "Dsim bias"))
+  )
+
+# =========================
+# 4. Shared theme
+# =========================
+theme_pub_small <- function(my_family = "sans") {
+  theme_bw(base_family = my_family) +
+  theme(
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+
+    panel.grid = element_blank(),
+    panel.spacing.x = unit(0.4, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.1),
+
+    strip.placement = "outside",
+    strip.text.x = element_text(
+      angle = 0, hjust = 0.5, size = 6,
+      margin = margin(t = 0, r = 0, b = 2, l = 0),
+      color = "black", family = "sans"
+    ),
+    strip.text.y.left = element_text(
+      angle = 0, size = 6,
+      color = "black", family = "sans"
+    ),
+
+    axis.text.x = element_text(size = 5, color = "black", family = "sans",angle = 45,hjust = 1,vjust = 1),
+    axis.text.y = element_text(size = 5, color = "black", family = "sans"),
+    axis.title.x = element_text(size = 7, color = "black", family = "sans"),
+    axis.title.y = element_text(size = 7, color = "black", family = "sans"),
+
+    axis.ticks = element_line(linewidth = 0.2, color = "black"),
+    axis.ticks.length = unit(1.5, "pt"),
+    axis.minor.ticks.x = element_line(linewidth = 0.1, color = "black"),
+    axis.minor.ticks.y = element_line(linewidth = 0.1, color = "black"),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+
+    legend.position = "right",
+    legend.margin = margin(t = 0, r = 0, b = 0, l = -2),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = -2),
+    legend.title = element_text(size = 6, color = "black", family = "sans"),
+    legend.text  = element_text(size = 6, color = "black", family = "sans"),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.box.spacing = unit(2, "pt"),
+
+    strip.clip = "off",
+    plot.margin = margin(t = 0, r = 0, b = 0, l = 0)
+  )
+}
+
+# =========================
+# 5. Left plot: scatter
+# =========================
+p_genomic_chr_scatter <- ggplot(
+  long_df_chr,
+  aes(x = x_log2, y = y_log2)
+) +
+  ggpointdensity::geom_pointdensity(size = 0.05) +
+  scale_color_viridis_c(
+    option = "plasma",
+    name = "Point density",
+    labels = scales::label_scientific(digits = 2)
+  ) +
+  geom_abline(
+    slope = 1, intercept = 0,
+    linetype = "dashed",
+    linewidth = 0.2,
+    color = "grey40"
+  ) +
+  scale_x_continuous(
+    expand = c(0,0),
+    breaks = c(0, 5, 10),
+    limits = c(0, 10),
+    minor_breaks = seq(0, max_val_log2, by = 2.5),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  scale_y_continuous(
+    expand = c(0,0),
+    breaks = c(0, 5, 10),
+    limits = c(0, 10),
+    minor_breaks = seq(0, max_val_log2, by = 2.5),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  facet_grid(
+    Sample ~ common,
+    switch = "y"
+  ) +
+  coord_fixed(ratio = 1) +
+  labs(
+    x = expression(log[2](Dmel + 1)),
+    y = expression(log[2](Dsim + 1))
+  ) +
+  theme_pub_small()
+
+# =========================
+# 6. Right plot: stacked bar
+# =========================
+p_genomic_chr_bar <- ggplot(
+  bar_df,
+  aes(x = 1, y = prop, fill = change_class)
+) +
+  geom_col(width = 0.75, color = "black", linewidth = 0.1) +
+  facet_grid(
+    Sample ~ common,
+    switch = "y"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0, 0),
+    breaks = c(0, 0.5, 1.0),
+    minor_breaks = seq(0, 1, by = 0.25),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  scale_x_continuous(
+    expand = c(0,0),
+    breaks = NULL,
+    minor_breaks = NULL
+  ) +
+  scale_fill_manual(
+    values = c(
+      "No bias"   = "grey70",
+      "Dmel bias" = "#1f78b4",
+      "Dsim bias" = "#d95f02"
+    ),
+    name = NULL
+  ) +
+  labs(
+    x = NULL,
+    y = "Proportion"
+  ) +
+  theme_pub_small() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    aspect.ratio = 1
+  )
+
+# =========================
+# 7. Combine
+# =========================
+p_genomic_chr_combined <- p_genomic_chr_scatter + p_genomic_chr_bar +
+  plot_layout(widths = c(1, 1)) &
+  theme(
+    legend.position = "right",
+
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background  = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA)
+  )
+```
+
+Save plots
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_genomic_chr_combined_canvas <- p_genomic_chr_combined + ggview::canvas(180,55, units = "mm", dpi = 600, bg = "transparent")
+p_genomic_chr_combined_canvas
+
+# ggsave("FigS8A.pdf",p_genomic_chr_combined, width=180,height=55,units="mm",dpi=900, bg = "transparent")
+```
+
+## Color with the location of genes
+
+```{r}
+#| echo: true
+#| warning: false
+
+# =========================================================
+# 1) 从 GTF 提取 gene -> chr(start)（只保留 mel genome）
+# =========================================================
+gtf_gene <- gtf %>%
+  filter(feature == "gene") %>%
+  mutate(
+    gene_id = sub('.*gene_id "([^"]+)".*', '\\1', attribute)
+  ) %>%
+  select(gene_id, chr, start)
+
+# 只保留 mel 染色体，并去掉后缀 _mel
+gtf_mel <- gtf_gene %>%
+  filter(grepl("_mel$", chr)) %>%
+  mutate(chr = sub("_mel$", "", chr))
+
+# =========================================================
+# 2) Orthogroup -> mel gene location（取最小 start 作为代表）
+# =========================================================
+get_location <- function(gene_string){
+  if(is.na(gene_string) || trimws(gene_string) == "")
+    return(data.frame(chr = NA_character_, start = NA_real_))
+
+  genes <- unlist(strsplit(gene_string, ",\\s*"))
+  genes <- trimws(genes)
+
+  loc <- gtf_mel %>% filter(gene_id %in% genes)
+  if(nrow(loc) == 0)
+    return(data.frame(chr = NA_character_, start = NA_real_))
+
+  loc <- loc[which.min(loc$start), ]
+  data.frame(chr = loc$chr, start = loc$start)
+}
+
+loc_list <- pblapply(
+  orthofinder_gene$isoquant_split.mel.pep.nostar,
+  get_location
+)
+
+loc_df <- do.call(rbind, loc_list)
+
+orthofinder_location <- data.frame(
+  Orthogroup = orthofinder_gene$Orthogroup,
+  chr   = loc_df$chr,
+  start = loc_df$start,
+  stringsAsFactors = FALSE
+)
+
+# =========================================================
+# 3) expr 转成长格式
+# =========================================================
+expr_location <- expr %>%
+  rename(gene = Gene) %>%
+  pivot_longer(
+    cols = -gene,
+    names_to = "Sample",
+    values_to = "expression"
+  )
+
+# =========================================================
+# 4) Orthogroup expression（mel vs sim）
+# =========================================================
+# mel genes
+mel_map <- orthofinder_gene %>%
+  select(Orthogroup, isoquant_split.mel.pep.nostar) %>%
+  rename(gene_list = isoquant_split.mel.pep.nostar)
+
+mel_long <- mel_map %>%
+  separate_rows(gene_list, sep = ",\\s*") %>%
+  rename(gene = gene_list)
+
+mel_expr <- merge(mel_long, expr_location, by = "gene") %>%
+  group_by(Orthogroup, Sample) %>%
+  summarise(mel = sum(expression, na.rm = TRUE), .groups = "drop")
+
+# sim genes
+sim_map <- orthofinder_gene %>%
+  select(Orthogroup, isoquant_split.sim.pep.nostar) %>%
+  rename(gene_list = isoquant_split.sim.pep.nostar)
+
+sim_long <- sim_map %>%
+  separate_rows(gene_list, sep = ",\\s*") %>%
+  rename(gene = gene_list)
+
+sim_expr <- merge(sim_long, expr_location, by = "gene") %>%
+  group_by(Orthogroup, Sample) %>%
+  summarise(sim = sum(expression, na.rm = TRUE), .groups = "drop")
+
+# mel + sim
+long_df <- merge(
+  mel_expr,
+  sim_expr,
+  by = c("Orthogroup", "Sample"),
+  all = TRUE
+)
+
+# =========================================================
+# 5) 合并 genomic location
+# =========================================================
+long_df_loc <- merge(
+  long_df,
+  orthofinder_location,
+  by = "Orthogroup",
+  all.x = TRUE
+)
+
+long_df_loc <- subset(long_df_loc, !is.na(chr))
+
+# 只保留主要染色体
+chromosomes <- c("chr3R")
+long_df_loc <- subset(long_df_loc, chr %in% chromosomes)
+
+long_df_loc <- subset(long_df_loc,
+                   Sample %in% c("6B"))
+
+# =========================================================
+# 新增：start 分组
+# =========================================================
+long_df_loc$region <- cut(
+  long_df_loc$start,
+  breaks = c(-Inf, 6.085e6, 20.08e6, Inf),
+  labels = c("start < 6.085M",
+             "6.085M – 20.08M",
+             "start > 20.08M")
+)
+
+# =========================================================
+# 6) 计算绘图范围
+# =========================================================
+max_val_log2 <- max(
+  log2(long_df_loc$mel + 1),
+  log2(long_df_loc$sim + 1),
+  na.rm = TRUE
+)
+
+# =========================================================
+# 7) 作图（普通点，按 start 上色，Sample × chr 分面）
+# =========================================================
+p_genomic_location <- ggplot(
+  long_df_loc,
+  aes(
+    x = log2(mel + 1),
+    y = log2(sim + 1),
+    color = region
+  )
+) +
+  geom_point(size = 3, alpha = 1) +
+
+  scale_color_manual(
+    values = c(
+      "start < 6.085M" = "#440154",
+      "6.085M – 20.08M" = "#21908C",
+      "start > 20.08M" = "#FDE725"
+    ),
+    name = "chr3R region"
+  ) +
+
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5,
+    color = "black"
+  ) +
+
+  coord_fixed(
+    ratio = 1,
+    xlim = c(0, max_val_log2),
+    ylim = c(0, max_val_log2)
+  ) +
+
+  labs(
+    x = expression(log[2](Dmel + 1)),
+    y = expression(log[2](Dsim + 1)),
+    title = "Genomic Coverage (chr3R, Sample 6B)"
+  ) +
+
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 20),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    panel.grid = element_blank(),
+    panel.spacing = unit(0.4, "lines"),
+    strip.text = element_text(size = 16,family = "sans",color = "black"),
+    legend.position = "right",
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    plot.background  = element_rect(fill = "transparent", colour = NA),
+    legend.background = element_rect(fill = "transparent"),
+    legend.box.background = element_rect(fill = "transparent")
+  )
+
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+#p_genomic_location_canvas <- p_genomic_location + ggview::canvas(10,10,units="in",dpi=600,bg="white")
+#ggsave("p_genomic_location_canvas_6b_3R.png",p_genomic_location, width=10,height=10,units="in",dpi=900)
+```
+
+# Plot for transcriptome
+
+I already generated the **transcriptome.csv** before.
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Read the genomic coverage information
+expr2 <- read.csv(transcriptome_file,sep = ",",stringsAsFactors=FALSE,check.names=FALSE)
+samples <- colnames(expr2)[-1]
+n_samples <- length(samples)
+draft2 <- data.frame(
+  Orthogroup = orthofinder_gene$Orthogroup,
+  check.names = FALSE
+)
+
+# Prepare a table
+for (s in samples) {
+  draft2[[paste0(s, "_mel")]] <- orthofinder_gene$isoquant_split.mel.pep.nostar
+  draft2[[paste0(s, "_sim")]] <- orthofinder_gene$isoquant_split.sim.pep.nostar
+}
+
+# Define a function to calculate the sum level
+get_expr_sum2 <- function(gene_string, sample_name) {
+  if (is.na(gene_string) || trimws(gene_string) == "")
+    return(NA_real_)
+  genes <- unlist(strsplit(gene_string, ",\\s*"))
+  genes <- trimws(genes)
+  genes <- unique(genes)
+  idx <- match(genes, expr2$gene_id)
+  idx <- idx[!is.na(idx)]
+  if (length(idx) == 0)
+    return(NA_real_)
+  sum(expr2[idx, sample_name])
+}
+
+# Fill the values
+for (s in samples) {
+  draft2[[paste0(s, "_mel")]] <- pbsapply(
+    draft2[[paste0(s, "_mel")]],
+    get_expr_sum2,
+    sample_name = s
+  )
+  draft2[[paste0(s, "_sim")]] <- pbsapply(
+    draft2[[paste0(s, "_sim")]],
+    get_expr_sum2,
+    sample_name = s
+  )
+}
+
+# Remove those orthogroups that only exist in one species
+og_with_na <- orthofinder_transcript$Orthogroup[
+  !complete.cases(orthofinder_transcript)
+]
+draft2_clean <- draft2[!draft$Orthogroup %in% og_with_na, ]
+
+# Convert to long format
+long_df2 <- draft2_clean %>%
+  pivot_longer(
+    cols = -Orthogroup,
+    names_to = c("Sample", "Species"),
+    names_sep = "_",
+    values_to = "Expression"
+  ) %>%
+  mutate(Expression = as.numeric(Expression)) %>%
+  pivot_wider(
+    names_from = Species,
+    values_from = Expression,
+    values_fn = sum
+  )
+long_df2$mel[is.na(long_df2$mel)] <- 0
+long_df2$sim[is.na(long_df2$sim)] <- 0
+long_df2 <- subset(long_df2,
+                   Sample %in% c("5A","6B","5B","7B","Ras3","ML82"))
+max_val_log2 <- max(log2(c(long_df2$mel,
+                           long_df2$sim) + 1),
+                    na.rm = TRUE)
+
+max_val_log2 <- max_val_log2 * 1.05
+
+```
+
+Add chromosome information
+
+```{r}
+#| echo: true
+#| warning: false
+# =========================
+# 1. Prepare data
+# =========================
+long_df_chr2 <- merge(
+  long_df2,
+  orthofinder_chr[, c("Orthogroup", "common")],
+  by = "Orthogroup",
+  all.x = TRUE
+)
+
+
+long_df_chr2 <- long_df_chr2 %>%
+  filter(!(mel == 0 & sim == 0))
+
+# Rename maps
+sample_map <- c(
+  "Ras3" = "Ras3",
+  "ML82" = "ML82",
+  "5A"   = "HYC1",
+  "5B"   = "HYC2",
+  "6B"   = "HYC3",
+  "7B"   = "HYC4"
+)
+
+chr_map <- c(
+  "chr2L" = "2L",
+  "chr2R" = "2R",
+  "chr3L" = "3L",
+  "chr3R" = "3R",
+  "chrX"  = "X",
+  "chr4"  = "4"
+)
+
+sample_levels <- unname(sample_map)
+chr_levels <- unname(chr_map)
+
+long_df_chr2 <- long_df_chr2 %>%
+  filter(!is.na(common)) %>%
+  filter(Sample %in% names(sample_map)) %>%
+  filter(common %in% names(chr_map)) %>%
+  mutate(
+    Sample = recode(Sample, !!!sample_map),
+    common = recode(common, !!!chr_map)
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+# =========================
+# 2. Classification
+# =========================
+signal_cutoff <- 0.2
+
+long_df_chr2 <- long_df_chr2 %>%
+  mutate(
+    x_log2 = log2(mel + 1),
+    y_log2 = log2(sim + 1),
+    total_expr = mel + sim,
+    mel_prop = if_else(total_expr > 0, mel / total_expr, NA_real_),
+    sim_prop = if_else(total_expr > 0, sim / total_expr, NA_real_),
+    change_class = case_when(
+      mel_prop > 0.7 ~ "Dmel bias",
+      mel_prop < 0.3 ~ "Dsim bias",
+      TRUE           ~ "No bias"
+    )
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+# =========================
+# 3. Summary stats
+# =========================
+stat_df2 <- long_df_chr2 %>%
+  group_by(Sample, common) %>%
+  summarise(
+    n_total = n(),
+    n_no_bias = sum(change_class == "No bias", na.rm = TRUE),
+    n_dmel    = sum(change_class == "Dmel bias", na.rm = TRUE),
+    n_dsim    = sum(change_class == "Dsim bias", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_no_bias = scales::percent(n_no_bias / n_total, accuracy = 0.1),
+    p_dmel    = scales::percent(n_dmel / n_total, accuracy = 0.1),
+    p_dsim    = scales::percent(n_dsim / n_total, accuracy = 0.1)
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+max_val_log2 <- max(
+  c(long_df_chr2$x_log2, long_df_chr2$y_log2),
+  na.rm = TRUE
+)
+
+bar_df2 <- stat_df2 %>%
+  select(Sample, common, n_total, n_no_bias, n_dmel, n_dsim) %>%
+  pivot_longer(
+    cols = c(n_no_bias, n_dmel, n_dsim),
+    names_to = "change_class",
+    values_to = "n"
+  ) %>%
+  mutate(
+    change_class = recode(
+      change_class,
+      n_no_bias = "No bias",
+      n_dmel    = "Dmel bias",
+      n_dsim    = "Dsim bias"
+    )
+  ) %>%
+  group_by(Sample, common) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels),
+    change_class = factor(change_class, levels = c("No bias", "Dmel bias", "Dsim bias"))
+  )
+
+# =========================
+# 4. Shared theme
+# =========================
+
+# =========================
+# 5. Left plot: scatter
+# =========================
+p_transcriptome_chr_scatter <- ggplot(
+  long_df_chr2,
+  aes(x = x_log2, y = y_log2)
+) +
+  ggpointdensity::geom_pointdensity(size = 0.01) +
+  scale_color_viridis_c(
+    option = "plasma",
+    name = "Point density",
+    labels = scales::label_scientific(digits = 2)
+  ) +
+  geom_abline(
+    slope = 1, intercept = 0,
+    linetype = "dashed",
+    linewidth = 0.2,
+    color = "grey40"
+  ) +
+  scale_x_continuous(
+    expand = c(0,0),
+    breaks = c(0, 10, 20),
+    limits = c(0, 20),
+    minor_breaks = seq(0, 20, by = 5),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  scale_y_continuous(
+    expand = c(0,0),
+    breaks = c(0, 10, 20),
+    limits = c(0, 20),
+    minor_breaks = seq(0,20, by = 5),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  facet_grid(
+    Sample ~ common,
+    switch = "y"
+  ) +
+  coord_fixed(ratio = 1) +
+  labs(
+    x = expression(log[2](Dmel + 1)),
+    y = expression(log[2](Dsim + 1))
+  ) +
+  theme_pub_small()
+
+# =========================
+# 6. Right plot: stacked bar
+# =========================
+p_transcriptome_chr_bar <- ggplot(
+  bar_df2,
+  aes(x = 1, y = prop, fill = change_class)
+) +
+  geom_col(width = 0.75, color = "black", linewidth = 0.1) +
+  facet_grid(
+    Sample ~ common,
+    switch = "y"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0, 0),
+    breaks = c(0, 0.5, 1.0),
+    minor_breaks = seq(0, 1, by = 0.25),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  scale_x_continuous(
+    expand = c(0,0),
+    breaks = NULL,
+    minor_breaks = NULL
+  ) +
+  scale_fill_manual(
+    values = c(
+      "No bias"   = "grey70",
+      "Dmel bias" = "#1f78b4",
+      "Dsim bias" = "#d95f02"
+    ),
+    name = NULL
+  ) +
+  labs(
+    x = NULL,
+    y = "Proportion"
+  ) +
+  theme_pub_small() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    aspect.ratio = 1
+  )
+
+# =========================
+# 7. Combine
+# =========================
+p_transcriptome_chr_combined <- p_transcriptome_chr_scatter + p_transcriptome_chr_bar +
+  plot_layout(widths = c(1, 1)) &
+  theme(
+    legend.position = "right",
+
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background  = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA)
+  )
+```
+
+Save the plots
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_transcriptome_chr_combined_canvas <- p_transcriptome_chr_combined + ggview::canvas(180,55, units = "mm", dpi = 600, bg = "transparent")
+p_transcriptome_chr_combined_canvas
+
+# ggsave("FigS8B.pdf",p_transcriptome_chr_combined, width=180,height=55,units="mm",dpi=900, bg = "transparent")
+```
+
+# Plot for relative expression
+
+I already generated the **comparison_sample_means.csv** before.
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Read the genomic coverage information
+expr3 <- read.csv(comparison_file,sep = ",",stringsAsFactors=FALSE,check.names=FALSE)
+samples <- colnames(expr3 )[5:ncol(expr3)]
+n_samples <- length(samples)
+draft3 <- data.frame(
+  Orthogroup = orthofinder_gene$Orthogroup,
+  check.names = FALSE
+)
+
+# Prepare a table
+for (s in samples) {
+  draft3[[paste0(s, "_mel")]] <- orthofinder_gene$isoquant_split.mel.pep.nostar
+  draft3[[paste0(s, "_sim")]] <- orthofinder_gene$isoquant_split.sim.pep.nostar
+}
+
+# Define a function to calculate the sum level
+get_expr_sum3 <- function(gene_string, sample_name) {
+  if (is.na(gene_string) || trimws(gene_string) == "")
+    return(NA_real_)
+  genes <- unlist(strsplit(gene_string, ",\\s*"))
+  genes <- trimws(genes)
+  genes <- unique(genes)
+  idx <- match(genes, expr3$gene)
+  idx <- idx[!is.na(idx)]
+  if (length(idx) == 0)
+    return(NA_real_)
+  sum(expr3[idx, sample_name])
+}
+
+# Fill the values
+for (s in samples) {
+  draft3[[paste0(s, "_mel")]] <- pbsapply(
+    draft3[[paste0(s, "_mel")]],
+    get_expr_sum3,
+    sample_name = s
+  )
+  draft3[[paste0(s, "_sim")]] <- pbsapply(
+    draft3[[paste0(s, "_sim")]],
+    get_expr_sum3,
+    sample_name = s
+  )
+}
+
+# Remove those orthogroups that only exist in one species
+og_with_na <- orthofinder_gene$Orthogroup[
+  !complete.cases(orthofinder_gene)
+]
+draft3_clean <- draft3[!draft$Orthogroup %in% og_with_na, ]
+
+# Convert to long format
+
+
+long_df3 <- draft3_clean %>%
+  pivot_longer(
+    cols = -Orthogroup,
+    names_to = c("Sample", "Species"),
+    names_sep = "_",
+    values_to = "Expression"
+  ) %>%
+  mutate(Expression = as.numeric(Expression)) %>%
+  pivot_wider(
+    names_from = Species,
+    values_from = Expression,
+    values_fn = sum
+  )
+long_df3$mel[is.na(long_df3$mel)] <- 0
+long_df3$sim[is.na(long_df3$sim)] <- 0
+long_df3 <- subset(long_df3,Sample %in% c("5A","6B","5B","7B","Ras3","ML82"))
+max_val_log2 <- max(log2(c(long_df3$mel,
+                           long_df3$sim) + 1),
+                    na.rm = TRUE)
+
+max_val_log2 <- max_val_log2 * 1.05
+```
+
+Add chromosome information
+
+```{r}
+#| echo: true
+#| warning: false
+
+# =========================
+# 1. Prepare data
+# =========================
+long_df_chr3 <- merge(
+  long_df3,
+  orthofinder_chr[, c("Orthogroup", "common")],
+  by = "Orthogroup",
+  all.x = TRUE
+)
+
+
+long_df_chr3 <- long_df_chr3 %>%
+  filter(!(mel == 0 & sim == 0))
+
+# Rename maps
+sample_map <- c(
+  "Ras3" = "Ras3",
+  "ML82" = "ML82",
+  "5A"   = "HYC1",
+  "5B"   = "HYC2",
+  "6B"   = "HYC3",
+  "7B"   = "HYC4"
+)
+
+chr_map <- c(
+  "chr2L" = "2L",
+  "chr2R" = "2R",
+  "chr3L" = "3L",
+  "chr3R" = "3R",
+  "chrX"  = "X",
+  "chr4"  = "4"
+)
+
+sample_levels <- unname(sample_map)
+chr_levels <- unname(chr_map)
+
+long_df_chr3 <- long_df_chr3 %>%
+  filter(!is.na(common)) %>%
+  filter(Sample %in% names(sample_map)) %>%
+  filter(common %in% names(chr_map)) %>%
+  mutate(
+    Sample = recode(Sample, !!!sample_map),
+    common = recode(common, !!!chr_map)
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+# =========================
+# 2. Classification
+# =========================
+signal_cutoff <- 0.2
+
+long_df_chr3 <- long_df_chr3 %>%
+  mutate(
+    x_log2 = log2(mel + 1),
+    y_log2 = log2(sim + 1),
+    total_expr = mel + sim,
+    mel_prop = if_else(total_expr > 0, mel / total_expr, NA_real_),
+    sim_prop = if_else(total_expr > 0, sim / total_expr, NA_real_),
+    change_class = case_when(
+      mel_prop > 0.7 ~ "Dmel bias",
+      mel_prop < 0.3 ~ "Dsim bias",
+      TRUE           ~ "No bias"
+    )
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+# =========================
+# 3. Summary stats
+# =========================
+stat_df3 <- long_df_chr3 %>%
+  group_by(Sample, common) %>%
+  summarise(
+    n_total = n(),
+    n_no_bias = sum(change_class == "No bias", na.rm = TRUE),
+    n_dmel    = sum(change_class == "Dmel bias", na.rm = TRUE),
+    n_dsim    = sum(change_class == "Dsim bias", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_no_bias = scales::percent(n_no_bias / n_total, accuracy = 0.1),
+    p_dmel    = scales::percent(n_dmel / n_total, accuracy = 0.1),
+    p_dsim    = scales::percent(n_dsim / n_total, accuracy = 0.1)
+  ) %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels)
+  )
+
+max_val_log2 <- max(
+  c(long_df_chr3$x_log2, long_df_chr3$y_log2),
+  na.rm = TRUE
+)
+
+bar_df3 <- stat_df3 %>%
+  select(Sample, common, n_total, n_no_bias, n_dmel, n_dsim) %>%
+  pivot_longer(
+    cols = c(n_no_bias, n_dmel, n_dsim),
+    names_to = "change_class",
+    values_to = "n"
+  ) %>%
+  mutate(
+    change_class = recode(
+      change_class,
+      n_no_bias = "No bias",
+      n_dmel    = "Dmel bias",
+      n_dsim    = "Dsim bias"
+    )
+  ) %>%
+  group_by(Sample, common) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    Sample = factor(Sample, levels = sample_levels),
+    common = factor(common, levels = chr_levels),
+    change_class = factor(change_class, levels = c("No bias", "Dmel bias", "Dsim bias"))
+  )
+
+# =========================
+# 4. Shared theme
+# =========================
+
+
+# =========================
+# 5. Left plot: scatter
+# =========================
+p_comparison_chr_scatter <- ggplot(
+  long_df_chr3,
+  aes(x = x_log2, y = y_log2)
+) +
+  ggpointdensity::geom_pointdensity(size = 0.01) +
+  scale_color_viridis_c(
+    option = "plasma",
+    name = "Point density",
+    labels = scales::label_scientific(digits = 2)
+  ) +
+  geom_abline(
+    slope = 1, intercept = 0,
+    linetype = "dashed",
+    linewidth = 0.2,
+    color = "grey40"
+  ) +
+  scale_x_continuous(
+    expand = c(0,0),
+    breaks = c(0, 10, 20),
+    limits = c(0, 20),
+    minor_breaks = seq(0, 20, by = 5),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  scale_y_continuous(
+    expand = c(0,0),
+    breaks = c(0, 10, 20),
+    limits = c(0, 20),
+    minor_breaks = seq(0,20, by = 5),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  facet_grid(
+    Sample ~ common,
+    switch = "y"
+  ) +
+  coord_fixed(ratio = 1) +
+  labs(
+    x = expression(log[2](Dmel + 1)),
+    y = expression(log[2](Dsim + 1))
+  ) +
+  theme_pub_small()
+
+# =========================
+# 6. Right plot: stacked bar
+# =========================
+p_comparison_chr_bar <- ggplot(
+  bar_df3,
+  aes(x = 1, y = prop, fill = change_class)
+) +
+  geom_col(width = 0.75, color = "black", linewidth = 0.2) +
+  facet_grid(
+    Sample ~ common,
+    switch = "y"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0, 0),
+    breaks = c(0, 0.5, 1.0),
+    minor_breaks = seq(0, 1, by = 0.25),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  scale_x_continuous(
+    expand = c(0,0),
+    breaks = NULL,
+    minor_breaks = NULL
+  ) +
+  scale_fill_manual(
+    values = c(
+      "No bias"   = "grey70",
+      "Dmel bias" = "#1f78b4",
+      "Dsim bias" = "#d95f02"
+    ),
+    name = NULL
+  ) +
+  labs(
+    x = NULL,
+    y = "Proportion"
+  ) +
+  theme_pub_small() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    aspect.ratio = 1
+  )
+
+# =========================
+# 7. Combine
+# =========================
+p_comparison_chr_combined <- p_comparison_chr_scatter + p_comparison_chr_bar +
+  plot_layout(widths = c(1, 1)) &
+  theme(
+    legend.position = "right",
+
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background  = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA)
+  )
+```
+
+Save the plots
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_comparison_chr_combined_canvas <- p_comparison_chr_combined + ggview::canvas(180,55, units = "mm", dpi = 600, bg = "transparent")
+p_comparison_chr_combined_canvas
+
+# ggsave("FigS8C.pdf",p_comparison_chr_combined, width=180,height=55,units="mm",dpi=900, bg = "transparent")
+```

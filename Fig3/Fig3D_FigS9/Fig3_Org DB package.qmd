@@ -1,0 +1,134 @@
+---
+title: "Fig.3 Help:Build Orthogroup-GO package"
+author: "Jie Hua"
+date: 2026-01-20
+lang: en
+date-modified: 2026-01-20
+keywords: ["Transcriptome","Comparison"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: false
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+```
+
+# Read orthofinder_term2gene.csv
+
+```{r}
+#| echo: true
+#| warning: false
+
+file <- "F:\\GitHub_mine\\GenomeBio\\HybridCells_Paper\\Fig5_Dosage compensation and Transcriptome\\orthofinder_term2gene.csv" 
+orthogroup_go <- fread(file)
+
+```
+
+Make a long table
+
+```{r}
+#| echo: true
+#| warning: false
+
+orthogroup_go_long <- orthogroup_go %>%
+  filter(!is.na(GO_union_all), GO_union_all != "") %>%
+  separate_rows(GO_union_all, sep = ",") %>%
+  rename(GO = GO_union_all) %>%
+  distinct(Orthogroup, GO) %>%              # 去重
+  filter(!is.na(GO), GO != "", GO != "-")    # 去掉空 / "-"
+```
+
+# Prepare data frames
+
+```{r}
+#| echo: true
+#| warning: false
+
+fGO <- orthogroup_go_long %>%
+  distinct(Orthogroup, GO) %>%          # 去重
+  transmute(
+    GID = Orthogroup,
+    GO = GO,
+    EVIDENCE = "eggnog"
+  ) %>%
+  as.data.frame()
+
+fSym <- orthogroup_go_long %>%
+  distinct(Orthogroup) %>%              # 每个 OG 只留一次
+  transmute(
+    GID = Orthogroup,
+    SYMBOL = Orthogroup,
+    GENENAME = Orthogroup
+  ) %>%
+  as.data.frame()
+
+fChr <- orthogroup_go_long %>%
+  distinct(Orthogroup) %>%
+  transmute(
+    GID = Orthogroup,
+    CHROMOSOME = "NO"
+  ) %>%
+  as.data.frame()
+
+# Check
+stopifnot(
+  !any(duplicated(fGO)),
+  !any(duplicated(fSym)),
+  !any(duplicated(fChr))
+)
+
+str(fGO)
+str(fSym)
+str(fChr)
+
+```
+
+# Use makeOrgPackage()
+
+```{r}
+#| echo: true
+#| warning: false
+
+AnnotationForge::makeOrgPackage(gene_info=fSym, chromosome=fChr, go=fGO,
+               version="0.1",
+               maintainer="Jie Hua <Jie.Hua@lmu.de>",
+               author="Jie Hua <Jie.Hua@lmu.de>",
+               outputDir = ".",
+               tax_id="1128429",
+               genus="Drosophila",
+               species="hybrid",
+               goTable="go")
+
+```
+
+# Install the package to have a try
+
+```{r}
+#| echo: true
+#| warning: false
+
+install.packages("./org.Dhybrid.eg.db", repos = NULL, type = "source")
+
+library(org.Dhybrid.eg.db)
+
+```

@@ -1,0 +1,845 @@
+---
+title: "FigS6 H3 fusion"
+author: "Jie Hua"
+date: 2026-04-07
+lang: en
+date-modified: 2026-04-07
+keywords: ["H3","Chromosome fusion"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: false
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(data.table)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(grid)
+```
+
+# Load *.paf* file generated from minimap2
+
+Define the paf file
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Define the paf file
+#paf_file <- "F:\\Big Paper\\Processed data\\Fig2_H3 Fusion\\H3_splited_reads_split.paf"
+
+#lab PC
+paf_file <- "H:\\HybridCells_Data\\FigS6_H3 Fusion\\H3_splited_reads_split.paf"
+
+
+```
+
+Read the paf file
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Read the file
+paf <- fread(paf_file,sep = "\t",header = FALSE,fill = TRUE)
+# Name the columns
+setnames(paf, c(
+  "query_name",        # 1
+  "query_length",      # 2
+  "query_start",       # 3
+  "query_end",         # 4
+  "strand",            # 5
+  "target_name",       # 6
+  "target_length",     # 7
+  "target_start",      # 8
+  "target_end",        # 9
+  "n_match",           # 10
+  "aln_block_length",  # 11
+  "mapq",              # 12
+  "tp",                # 13
+  "cm",                # 14
+  "s1",                # 15
+  "s2",                # 16
+  "dv",                # 17
+  "rl"                 # 18
+))
+```
+
+Convert to int
+
+```{r}
+#| echo: true
+#| warning: false
+
+int_cols <- c(
+  "query_length", "query_start", "query_end",
+  "target_length", "target_start", "target_end",
+  "n_match", "aln_block_length", "mapq"
+)
+
+for (cc in int_cols) {
+  paf[, (cc) := as.integer(get(cc))]
+}
+```
+
+Split the query name
+
+```{r}
+#| echo: true
+#| warning: false
+
+tmp <- tstrsplit(paf$query_name, "\\|", fixed = FALSE)
+
+# 为了稳妥，先检查是否至少拆出5段
+if (length(tmp) < 5) {
+  stop("query_name 按 | 拆分后不足5段，请检查输入格式。")
+}
+
+paf[, read_id := tmp[[1]]]
+paf[, part := sub("^part=", "", tmp[[2]])]
+paf[, match_type := sub("^match_type=", "", tmp[[3]])]
+paf[, match := sub("^match=", "", tmp[[4]])]
+paf[, segment := sub("^segment=", "", tmp[[5]])]
+
+# 再拆 match 坐标
+paf[, c("match_start", "match_end") := tstrsplit(match, "-", fixed = TRUE)]
+paf[, match_start := as.integer(match_start)]
+paf[, match_end := as.integer(match_end)]
+
+# 再拆 segment 坐标
+paf[, c("segment_start", "segment_end") := tstrsplit(segment, "-", fixed = TRUE)]
+paf[, segment_start := as.integer(segment_start)]
+paf[, segment_end := as.integer(segment_end)]
+
+```
+
+Extract tag columns
+
+```{r}
+#| echo: true
+#| warning: false
+
+extract_tag_value <- function(x, tag_prefix, type_prefix) {
+  sub(
+    paste0("^", tag_prefix, ":", type_prefix, ":"),
+    "",
+    x
+  )
+}
+
+paf[, tp := extract_tag_value(tp, "tp", "A")]
+paf[, cm := as.integer(extract_tag_value(cm, "cm", "i"))]
+paf[, s1 := as.integer(extract_tag_value(s1, "s1", "i"))]
+paf[, s2 := as.integer(extract_tag_value(s2, "s2", "i"))]
+paf[, dv := as.numeric(extract_tag_value(dv, "dv", "f"))]
+paf[, rl := as.integer(extract_tag_value(rl, "rl", "i"))]
+
+```
+
+# Covert the number
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+# 确保 paf 是 data.table
+setDT(paf)
+
+# =========================
+# 1. 还原到原始 read 坐标
+# =========================
+paf[, orig_read_start := segment_start + query_start]
+paf[, orig_read_end   := segment_start + query_end - 1]
+
+# =========================
+# 2. 参考基因组坐标转成 1-based
+# =========================
+paf[, ref_start := target_start + 1]
+paf[, ref_end   := target_end]
+
+# =========================
+# 3. 生成一个干净表
+# =========================
+orig_map <- paf[, .(
+  read_id,
+  part,
+  match_type,
+  match_start,
+  match_end,
+  segment_start,
+  segment_end,
+  
+  # 片段内部比对坐标（PAF query）
+  query_length,
+  query_start,
+  query_end,
+  
+  # 还原后的原始 read 坐标
+  orig_read_start,
+  orig_read_end,
+  
+  # 比对方向和参考基因组位置
+  strand,
+  target_name,
+  target_length,
+  target_start,
+  target_end,
+  ref_start,
+  ref_end,
+  
+  # alignment 质量信息
+  n_match,
+  aln_block_length,
+  mapq,
+  tp,
+  cm,
+  s1,
+  s2,
+  dv,
+  rl
+)]
+
+```
+
+# Plot1: Dot plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+setDT(orig_map)
+
+reads_to_plot <- unique(orig_map$read_id)
+dt <- copy(orig_map[read_id %in% reads_to_plot])
+
+target_windows <- data.table(
+  target_name = c("chr3R_mel", "chr3R_sim"),
+  ymin = c(6070000, 2090000),
+  ymax = c(6090000, 2100000)
+)
+
+dt <- merge(dt, target_windows, by = "target_name", all.x = TRUE)
+dt <- dt[ref_end >= ymin & ref_start <= ymax]
+
+dt[, read_id := factor(read_id, levels = unique(read_id))]
+dt[, target_name := factor(target_name, levels = c("chr3R_mel", "chr3R_sim"))]
+
+dt[, `:=`(
+  x1 = ifelse(strand == "+", ref_start, ref_end),
+  x2 = ifelse(strand == "+", ref_end, ref_start),
+  y1 = orig_read_start,
+  y2 = orig_read_end
+)]
+
+# ---- 每个panel只保留两个刻度 ----
+breaks_min_max <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(numeric(0))
+  rx <- range(x)
+  if (rx[1] == rx[2]) return(rx[1])
+  c(rx[1], rx[2])
+}
+
+breaks_zero_max <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(numeric(0))
+  xmax <- max(x)
+  if (xmax == 0) return(0)
+  c(0, xmax)
+}
+
+# ---- bp 转 kb 标签 ----
+kb_labels <- function(x) {
+  format(round(x / 1000, 1), trim = TRUE, scientific = FALSE)
+}
+
+p <- ggplot(dt) +
+  geom_segment(
+    aes(
+      x = x1, y = y1,
+      xend = x2, yend = y2,
+      color = match_type
+    ),
+    linewidth = 0.6
+  ) +
+  facet_grid(
+    read_id ~ target_name,
+    scales = "free",
+    switch = "both"
+  ) +
+  scale_color_manual(
+    values = c(forward = "#1f78b4", reverse = "#d95f02"),
+    name = "Alignment\nDirection"
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    breaks = function(x) range(x, na.rm = TRUE),
+    labels = kb_labels
+  )+
+  scale_y_continuous(
+    expand = c(0, 0),
+    limits = function(x) c(0, max(x, na.rm = TRUE)),
+    breaks = breaks_zero_max,
+    labels = kb_labels
+  ) +
+  labs(
+    x = "Reference coordinate (kb)",
+    y = "Read coordinate (kb)"
+  ) +
+  theme_minimal(base_size = 6) +
+  theme(
+    text = element_text(family = "sans", color = "black"),
+
+    # ===== 背景透明 =====
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+
+    # ===== 去网格 =====
+    panel.grid = element_blank(),
+
+    # ===== panel / border =====
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.3),
+    panel.spacing.x = unit(0.6, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+
+    # ===== strip =====
+    strip.placement = "outside",
+    strip.clip = "off",
+    strip.text.x = element_text(
+      size = 6,
+      color = "black",
+      angle = 0,
+      hjust = 0.5,
+      margin = margin(t = 0, r = 0, b = 2, l = 0)
+    ),
+    strip.text.y.left = element_text(
+      size = 6,
+      color = "black",
+      angle = 0,
+      hjust = 0.5,
+      vjust = 0.5,
+      margin = margin(t = 0, r = 2, b = 0, l = 0)
+    ),
+
+    # ===== 坐标轴 =====
+    axis.text.x = element_text(
+      size = 5,
+      color = "black",
+      angle = -45,
+      hjust = 0,
+      vjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 5,
+      color = "black"
+    ),
+    axis.title.x = element_text(
+      size = 7,
+      color = "black"
+    ),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black"
+    ),
+    axis.ticks = element_line(linewidth = 0.2, color = "black"),
+    axis.ticks.length = unit(1.5, "pt"),
+
+    # ===== 图例 =====
+    legend.position = "right",
+    legend.justification = c("right", "top"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.title = element_text(size = 6, color = "black"),
+    legend.text = element_text(size = 6, color = "black"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.spacing.y = unit(2, "pt"),
+    legend.spacing.x = unit(0.5, "pt"),
+
+    # ===== 外边距 =====
+    plot.margin = margin(t = 3, r = 3, b = 0, l = 0)
+  ) +
+  guides(
+    color = guide_legend(
+      keywidth = unit(6, "pt"),
+      keyheight = unit(6, "pt")
+    )
+  )
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_canvas <- p+ggview::canvas(120,80,units="mm",dpi=600,bg="transparent")
+p_canvas
+#ggsave("H3_fusion.pdf",p,width=120,height=80,units="mm",dpi=900,bg="transparent")
+```
+
+# Plot2: Diagram
+
+```{r}
+#| echo: true
+#| warning: false
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(grid)
+
+# =========================================================
+# 0. Settings
+# =========================================================
+top_name <- "chr3R_mel"
+bottom_name <- "chr3R_sim"
+
+col_top <- "#ed556a"
+col_bottom <- "#61649F"
+
+# 参考窗口大小：top 画 breakpoint 左边 flank_bp bp；bottom 画 breakpoint 右边 flank_bp bp
+flank_bp <- 3000
+
+# 参考条长度（图坐标）
+ref_left_xmin <- -1.00
+ref_left_xmax <-  0.00
+ref_right_xmin <- 0.00
+ref_right_xmax <- 1.00
+
+# 中间 read 的最大显示半宽
+max_half_width <- 0.88
+min_half_width <- 0.06
+
+# 纵向布局
+y_top <- 1.00
+y_bottom <- 0.00
+y_read_top <- 0.84
+y_read_bottom <- 0.16
+
+# 标签距离
+read_label_gap <- 0.08
+ref_label_gap  <- 0.12
+ellipsis_gap   <- 0.04
+
+# 箭头长度
+arrow_len <- unit(2.6, "pt")
+
+
+# =========================================================
+# 1. Start from dt
+# =========================================================
+dt_tbl <- as_tibble(dt) %>%
+  filter(target_name %in% c(top_name, bottom_name)) %>%
+  mutate(
+    ref_lo = pmin(ref_start, ref_end, na.rm = TRUE),
+    ref_hi = pmax(ref_start, ref_end, na.rm = TRUE),
+    qry_lo = pmin(orig_read_start, orig_read_end, na.rm = TRUE),
+    qry_hi = pmax(orig_read_start, orig_read_end, na.rm = TRUE)
+  )
+
+# 每个 read 在每个 target 上汇总成一个总命中区段
+hit_sum <- dt_tbl %>%
+  group_by(read_id, target_name) %>%
+  summarise(
+    ref_start = min(ref_lo, na.rm = TRUE),
+    ref_end   = max(ref_hi, na.rm = TRUE),
+    ref_mid   = (ref_start + ref_end) / 2,
+
+    qry_start = min(qry_lo, na.rm = TRUE),
+    qry_end   = max(qry_hi, na.rm = TRUE),
+    qry_mid   = (qry_start + qry_end) / 2,
+
+    match_len = max(qry_hi, na.rm = TRUE) - min(qry_lo, na.rm = TRUE) + 1,
+    read_len  = max(query_length, na.rm = TRUE),
+
+    strand_major = if_else(
+      sum(strand == "-", na.rm = TRUE) > sum(strand == "+", na.rm = TRUE),
+      "-",
+      "+"
+    ),
+    .groups = "drop"
+  )
+
+# 只保留同时命中两个 target 的 reads
+reads_keep <- hit_sum %>%
+  count(read_id, name = "n_targets") %>%
+  filter(n_targets == 2) %>%
+  pull(read_id)
+
+hit_sum2 <- hit_sum %>%
+  filter(read_id %in% reads_keep)
+
+top_hits <- hit_sum2 %>%
+  filter(target_name == top_name) %>%
+  transmute(
+    read_id,
+    top_ref_start = ref_start,
+    top_ref_end   = ref_end,
+    top_ref_mid   = ref_mid,
+    top_match_len = match_len,
+    top_strand    = strand_major
+  )
+
+bottom_hits <- hit_sum2 %>%
+  filter(target_name == bottom_name) %>%
+  transmute(
+    read_id,
+    bottom_ref_start = ref_start,
+    bottom_ref_end   = ref_end,
+    bottom_ref_mid   = ref_mid,
+    bottom_match_len = match_len,
+    bottom_strand    = strand_major
+  )
+
+bridge_df <- inner_join(top_hits, bottom_hits, by = "read_id")
+
+if (nrow(bridge_df) == 0) {
+  stop("No reads bridge the two selected targets.")
+}
+
+# =========================================================
+# 2. Define global breakpoint
+# =========================================================
+# 你的要求是：
+# chr3R_mel 只画断点左边 -> 用 top_ref_end 作为 breakpoint
+# chr3R_sim 只画断点右边 -> 用 bottom_ref_start 作为 breakpoint
+bp_top_global <- median(bridge_df$top_ref_end, na.rm = TRUE)
+bp_bottom_global <- median(bridge_df$bottom_ref_start, na.rm = TRUE)
+
+top_window_start <- bp_top_global - flank_bp
+top_window_end   <- bp_top_global
+
+bottom_window_start <- bp_bottom_global
+bottom_window_end   <- bp_bottom_global + flank_bp
+
+fmt_bp <- function(x) scales::label_number(big.mark = ",", accuracy = 1)(x)
+
+# =========================================================
+# 3. Scale read lengths into plot widths
+# =========================================================
+# 左边蓝色长度按 chr3R_mel 匹配长度
+# 右边黄色长度按 chr3R_sim 匹配长度
+max_match <- max(c(bridge_df$top_match_len, bridge_df$bottom_match_len), na.rm = TRUE)
+if (is.na(max_match) || max_match <= 0) max_match <- 1
+
+bridge_df <- bridge_df %>%
+  mutate(
+    left_w = scales::rescale(top_match_len, to = c(min_half_width, max_half_width), from = c(1, max_match)),
+    right_w = scales::rescale(bottom_match_len, to = c(min_half_width, max_half_width), from = c(1, max_match))
+  )
+
+# 排序：按 top 命中位置排，让图更整齐
+bridge_df <- bridge_df %>%
+  arrange(top_ref_mid, bottom_ref_mid) %>%
+  mutate(read_order = row_number())
+
+n_reads <- nrow(bridge_df)
+if (n_reads == 1) {
+  bridge_df$y_read <- mean(c(y_read_top, y_read_bottom))
+} else {
+  bridge_df$y_read <- seq(y_read_top, y_read_bottom, length.out = n_reads)
+}
+
+# =========================================================
+# 4. Build plot tables
+# =========================================================
+# ---- reference segments ----
+ref_df <- tibble(
+  seg = c("top", "bottom"),
+  x = c(ref_left_xmin, ref_right_xmin),
+  xend = c(ref_left_xmax, ref_right_xmax),
+  y = c(y_top, y_bottom),
+  yend = c(y_top, y_bottom),
+  color = c(col_top, col_bottom)
+)
+
+# ---- read segments ----
+# 左边蓝色段：[-left_w, 0]
+# 右边黄色段：[0, right_w]
+read_left_df <- bridge_df %>%
+  transmute(
+    read_id,
+    y = y_read,
+    yend = y_read,
+    xmin = -left_w,
+    xmax = 0,
+    forward = top_strand == "+",
+    color = col_top
+  ) %>%
+  mutate(
+    x = if_else(forward, xmin, xmax),
+    xend = if_else(forward, xmax, xmin)
+  )
+
+read_right_df <- bridge_df %>%
+  transmute(
+    read_id,
+    y = y_read,
+    yend = y_read,
+    xmin = 0,
+    xmax = right_w,
+    forward = bottom_strand == "+",
+    color = col_bottom
+  ) %>%
+  mutate(
+    x = if_else(forward, xmin, xmax),
+    xend = if_else(forward, xmax, xmin)
+  )
+
+# ---- labels ----
+read_label_df <- bridge_df %>%
+  transmute(
+    read_id,
+    x = -(left_w + read_label_gap),
+    y = y_read,
+    label = paste0(
+      read_id,
+      ifelse(
+        top_strand == "+",
+        " →",
+        " ←"
+      )
+    )
+  )
+
+ref_label_df <- tibble(
+  x = c(ref_left_xmin - ref_label_gap, ref_right_xmax + ref_label_gap),
+  y = c(y_top, y_bottom),
+  label = c(top_name, bottom_name),
+  hjust = c(1, 0)
+)
+
+coord_label_df <- tibble(
+  x = c(ref_left_xmin, ref_left_xmax, ref_right_xmin, ref_right_xmax),
+  y = c(y_top, y_top, y_bottom, y_bottom),
+  label = c(
+    fmt_bp(top_window_start),
+    fmt_bp(top_window_end),
+    fmt_bp(bottom_window_start),
+    fmt_bp(bottom_window_end)
+  ),
+  hjust = c(0, 1, 0, 1),
+  vjust = c(-1.2, -1.2, 2.2, 2.2)
+)
+
+ellipsis_df <- tibble(
+  x = c(ref_left_xmin - ellipsis_gap, ref_right_xmax + ellipsis_gap),
+  y = c(y_top, y_bottom),
+  label = c("···", "···"),
+  hjust = c(1, 0)
+)
+
+break_df <- tibble(
+  x = 0,
+  xend = 0,
+  y = y_bottom - 0.04,
+  yend = y_top + 0.04
+)
+
+# =========================================================
+# 5. Plot
+# =========================================================
+# ============================================================
+# Theme for breakpoint plot
+# ============================================================
+
+theme_breakpoint <- function(my_family = "sans") {
+  theme_bw(base_family = my_family) +
+    theme(
+      # Transparent backgrounds
+      plot.background = element_rect(fill = "transparent", color = NA),
+      panel.background = element_rect(fill = "transparent", color = NA),
+      legend.background = element_rect(fill = "transparent", color = NA),
+      legend.box.background = element_rect(fill = "transparent", color = NA),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      strip.background = element_rect(fill = "transparent", color = NA),
+
+      # Grid
+      panel.grid = element_blank(),
+
+      # Border
+      panel.border = element_blank(),
+
+      # Avoid double-thick borders
+      axis.line = element_blank(),
+
+      # Remove axes
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+
+      # Text style
+      text = element_text(
+        family = my_family,
+        color = "black"
+      ),
+
+      # Plot margin
+      plot.margin = margin(t = 8, r = 36, b = 8, l = 36)
+    )
+}
+
+
+# ============================================================
+# Breakpoint plot
+# ============================================================
+
+p_break <- ggplot() +
+
+  # breakpoint center line
+  geom_segment(
+    data = break_df,
+    aes(x = x, xend = xend, y = y, yend = yend),
+    linewidth = 0.25,
+    linetype = "dashed",
+    color = "grey50",
+    lineend = "butt"
+  ) +
+
+  # reference segments
+  geom_segment(
+    data = ref_df,
+    aes(
+      x = x,
+      xend = xend,
+      y = y,
+      yend = yend,
+      color = color
+    ),
+    linewidth = 3.0,
+    lineend = "butt"
+  ) +
+
+  # read left segments
+  geom_segment(
+    data = read_left_df,
+    aes(
+      x = x,
+      xend = xend,
+      y = y,
+      yend = yend,
+      color = color
+    ),
+    linewidth = 2.3,
+    lineend = "butt"
+  ) +
+
+  # read right segments
+  geom_segment(
+    data = read_right_df,
+    aes(
+      x = x,
+      xend = xend,
+      y = y,
+      yend = yend,
+      color = color
+    ),
+    linewidth = 2.3,
+    lineend = "butt"
+  ) +
+
+  # read ids
+  geom_text(
+    data = read_label_df,
+    aes(x = x, y = y, label = label),
+    hjust = 1,
+    vjust = 0.5,
+    size = 2.1,
+    family = "sans",
+    color = "black"
+  ) +
+
+  # reference names
+  geom_text(
+    data = ref_label_df,
+    aes(x = x, y = y, label = label, hjust = hjust),
+    vjust = 0.5,
+    size = 2.6,
+    family = "sans",
+    color = "black"
+  ) +
+
+  # interval start/end labels
+  geom_text(
+    data = coord_label_df,
+    aes(
+      x = x,
+      y = y,
+      label = label,
+      hjust = hjust,
+      vjust = vjust
+    ),
+    size = 2.1,
+    family = "sans",
+    color = "black"
+  ) +
+
+  # ellipsis
+  geom_text(
+    data = ellipsis_df,
+    aes(x = x, y = y, label = label, hjust = hjust),
+    vjust = 0.5,
+    size = 3.1,
+    family = "sans",
+    color = "black"
+  ) +
+
+  scale_color_identity() +
+
+  scale_x_continuous(
+    limits = c(-1.55, 1.28),
+    expand = c(0, 0)
+  ) +
+
+  scale_y_continuous(
+    limits = c(-0.10, 1.10),
+    expand = c(0, 0)
+  ) +
+
+  coord_cartesian(clip = "off") +
+
+  theme_breakpoint(my_family = "sans")
+
+p_break
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+
+p_bridge_canvas <- p_break + ggview::canvas(180,80,units="mm",dpi=900,bg="transparent")
+p_bridge_canvas
+
+#ggview::save_ggplot(p_break, "diagram.pdf",width=180, height=80,units="mm",dpi=900,bg="transparent")
+
+#ggsave("diagram.pdf",p_break,width = 180,height = 80,units = "mm",dpi = 600,bg = "transparent")
+```

@@ -1,0 +1,1515 @@
+---
+title: "Fig.3C Dosage compensation and Transcriptome"
+author: "Jie Hua"
+date: 2025-10-01
+lang: en
+date-modified: 2026-05-04
+keywords: ["Dosage compensation","Transcriptome"]
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: false
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+# Load required packages
+
+```{r}
+#| echo: true
+#| warning: false
+#| message: false
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(stringr)
+```
+
+# Define some functions
+
+```{r}
+#| echo: true
+#| warning: false
+
+source("functions.R")
+
+```
+
+# Load the files
+
+## Define a folder
+
+```{r}
+#| echo: true
+#| warning: false
+
+folder_path <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome"
+#folder_path <- "F:\\Big Paper\\Processed data\\Fig3C_Dosage and Transcriptome"
+```
+
+## Define main chromosomes
+
+```{r}
+#| echo: true
+#| warning: false
+
+selected_chromosomes <- c("chr2L_mel","chr2R_mel","chr3L_mel","chr3R_mel","chr4_mel","chrX_mel","chr2L_sim","chr2R_sim","chr3L_sim","chr3R_sim","chr4_sim","chrX_sim")
+
+```
+
+## Read the genomic coverage generates by *mosdepth*
+
+I already got the genomic coverage on all annotated genes.
+
+```{r}
+#| echo: true
+#| warning: false
+
+folder_genome <- paste0(folder_path,"/genomic")
+
+data_genome <- read_genomic_coverage(folder_genome, pattern="\\.regions\\.bed$",cutoff=1)
+
+info <- visualize_genome(data_genome, selected_chromosomes,facet_by_chrom = TRUE)
+
+genome_totalbases <- read_totalbases(bam_summary=paste0(folder_path,"/","bam_summary_genome.csv"))
+
+data_genome_normalized <- normalize_genome(data_genome,genome_totalbases,selected_chromosomes)
+
+info <- visualize_genome(data_genome_normalized, selected_chromosomes,facet_by_chrom = TRUE)
+
+#write.csv(data_genome, "C:/temp/GenomicCoverageData.csv", row.names = FALSE)
+```
+
+## Read transcriptome counts and normalize
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+data_transcriptome <- read_transcriptome_counts(transcriptome=paste0(folder_path,"/transcriptome/","All.discovered_gene_grouped_counts.tsv"),gtf=paste0(folder_path,"/transcriptome/","All.extended_annotation.gtf"))
+
+info <- visualize_transcriptome(data_transcriptome,selected_chromosomes,facet_by_chrom = TRUE)
+
+data_transcriptome_normalized  <- normalize_transcriptome(data_transcriptome,selected_chromosomes)
+
+info <- visualize_transcriptome(data_transcriptome_normalized,selected_chromosomes,facet_by_chrom = TRUE)
+
+#write.csv(data_transcriptome, "C:/temp/TranscriptomeCountsData.csv", row.names = FALSE)
+```
+
+# Comparison
+
+```{r}
+#| echo: true
+#| warning: false
+
+# Sample map list
+sample_map <- list(
+  "Ras3" = c("Ras3_rep1", "Ras3_rep2", "Ras3_rep3"),
+  "ML82" = c("ML82_rep1", "ML82_rep2", "ML82_rep3"),
+  "HYC1" = c("5A_rep1", "5A_rep2", "5A_rep3"),
+  "HYC2" = c("5B_rep1", "5B_rep2", "5B_rep3"),
+  "HYC3" = c("6B_rep1", "6B_rep2", "6B_rep3"),
+  "HYC4" = c("7B_rep1", "7B_rep2", "7B_rep3"),
+  "ML82" = c("ML82_rep1", "ML82_rep2", "ML82_rep3")
+)
+# Transcriptome to genome
+genome_col_map <- list(
+  "Ras3" = "Ras3_q30",
+  "ML82" = "ML82_q30",
+  "HYC1" = "05a_q30",
+  "HYC2" = "05b_barcode19_q30",
+  "HYC3" = "06b_q30",
+  "HYC4" = "07b_barcode23_q30"
+)
+comparison <- compare_transcriptome_genome(data_transcriptome_normalized, data_genome_normalized, sample_map, genome_col_map)
+#write.csv(comparison,"comparison.csv",row.names=F)
+
+```
+
+## Plot the distribution of the expression level matrix
+
+```{r}
+#| echo: true
+#| warning: false
+
+visualize_comparison_distribution(comparison)
+visualize_comparison_distribution_by_chrom(comparison, selected_chromosomes)
+visualize_comparison_summary(comparison)
+```
+
+# Summarize to final barplot (Mean ± SD)
+
+## Convert to wide-format
+
+```{r}
+#| echo: true
+#| warning: false
+
+comparison <- as.data.table(comparison)
+sample_cols <- setdiff(colnames(comparison), c("chrom","start","end","gene"))
+
+long_comparison  <- melt(
+  comparison ,
+  id.vars = c("chrom","start","end","gene"),
+  measure.vars = sample_cols,
+  variable.name = "sample",
+  value.name = "expression"
+)
+
+long_comparison <- as.data.table(long_comparison)
+
+#write.csv(long_comparison,"long_comparison.csv",row.names=F)
+```
+
+## Add group name
+
+```{r}
+#| echo: true
+#| warning: false
+
+long_comparison[, sample_group := str_extract(sample, "^[0-9A-Za-z]+")]
+```
+
+## *D. mel* chromosomes
+
+```{r}
+#| echo: true
+#| warning: false
+
+my_family="sans"
+
+sample_order <- c("Ras3","HYC1","HYC2","HYC3","HYC4")
+
+mel_dt <- long_comparison[
+  grepl("mel$", chrom) &
+    (grepl("^[0-9]", sample_group) | sample_group == "Ras3")
+]
+
+mel_sum <- mel_dt[, .(
+  sum_expr = sum(expression, na.rm = TRUE)
+), by = .(sample_group, chrom, sample)]
+
+mel_summary <- mel_sum[, .(
+  mean_sum = mean(sum_expr, na.rm = TRUE),
+  sd_sum   = sd(sum_expr, na.rm = TRUE)
+), by = .(sample_group, chrom)]
+
+mel_summary <- mel_summary %>%
+  mutate(
+    sample_group = case_when(
+      sample_group == "5A" ~ "HYC1",
+      sample_group == "5B" ~ "HYC2",
+      sample_group == "6B" ~ "HYC3",
+      sample_group == "7B" ~ "HYC4",
+      TRUE ~ sample_group
+    ),
+    sample_group = factor(sample_group, levels = sample_order)
+  )
+
+p1 <- ggplot(
+  mel_summary,
+  aes(x = chrom, y = mean_sum, fill = sample_group)
+) +
+  geom_col(
+    width = 0.8,
+    position = position_dodge(width = 0.8),
+    color = "black",
+    linewidth = 0.1
+  ) +
+  geom_errorbar(
+    aes(
+      ymin = mean_sum - sd_sum,
+      ymax = mean_sum + sd_sum
+    ),
+    width = 0.2,
+    linewidth = 0.2,
+    position = position_dodge(width = 0.8),
+    color = "black"
+  ) +
+  scale_fill_viridis_d(
+    option = "magma",
+    begin = 0,
+    end = 0.9,
+    limits = sample_order,
+    drop = FALSE,
+    name = "Sample"
+  ) +
+  labs(
+    title = expression(italic("D. mel") ~ " chromosomes: Hybrids and Ras3"),
+    y = "Sum of Relative Expression Level",
+    x = "Chromosome"
+  ) +
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Title
+    plot.title = element_text(
+      size = 7,
+      color = "black",
+      family = my_family,
+      face = "plain",
+      hjust = 0.5,
+      margin = margin(b = 3)
+    ),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      color = "black",
+      family = my_family
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 0, l = 2)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    # Panel spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  ) +
+  guides(
+    fill = guide_legend(
+      keywidth = unit(6, "pt"),
+      keyheight = unit(6, "pt"),
+      ncol = 1,
+      bycol = TRUE,
+      label.position = "right",
+      label.hjust = 0,
+      override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+    )
+  )
+
+```
+
+View and save
+
+```{r}
+#| echo: true
+#| warning: false
+
+p1_canvas <- p1+ggview::canvas(70,50,units="mm",dpi=900,bg="transparent")
+p1_canvas
+#ggsave("dc_dmel.png",p1,width=7, height=5,units="in",dpi = 1200)
+
+```
+
+## *D. sim* chromosomes
+
+```{r}
+#| echo: true
+#| warning: false
+
+sample_order_sim <- c("ML82","HYC1","HYC2","HYC3","HYC4")
+
+sim_dt <- long_comparison[
+  grepl("sim$", chrom) &
+    (grepl("^[0-9]", sample_group) | sample_group == "ML82")
+]
+
+sim_sum <- sim_dt[, .(
+  sum_expr = sum(expression, na.rm = TRUE)
+), by = .(sample_group, chrom, sample)]
+
+sim_summary <- sim_sum[, .(
+  mean_sum = mean(sum_expr, na.rm = TRUE),
+  sd_sum   = sd(sum_expr, na.rm = TRUE)
+), by = .(sample_group, chrom)]
+
+sim_summary <- sim_summary %>%
+  mutate(
+    sample_group = case_when(
+      sample_group == "5A" ~ "HYC1",
+      sample_group == "5B" ~ "HYC2",
+      sample_group == "6B" ~ "HYC3",
+      sample_group == "7B" ~ "HYC4",
+      TRUE ~ sample_group
+    ),
+    sample_group = factor(sample_group, levels = sample_order_sim)
+  ) %>%
+  filter(sample_group != "Ras3")
+
+p2 <- ggplot(
+  sim_summary,
+  aes(x = chrom, y = mean_sum, fill = sample_group)
+) +
+  geom_col(
+    width = 0.8,
+    position = position_dodge(width = 0.8),
+    color = NA,
+    linewidth = 0.1
+  ) +
+  geom_errorbar(
+    aes(
+      ymin = mean_sum - sd_sum,
+      ymax = mean_sum + sd_sum
+    ),
+    width = 0.2,
+    linewidth = 0.2,
+    position = position_dodge(width = 0.8),
+    color = "black"
+  ) +
+  scale_fill_viridis_d(
+    option = "viridis",
+    begin = 0,
+    end = 0.9,
+    limits = sample_order_sim,
+    drop = FALSE,
+    name = "Sample"
+  ) +
+  labs(
+    title = expression(italic("D. sim") ~ " chromosomes: Hybrids and ML82"),
+    y = "Sum of Relative Expression Level",
+    x = "Chromosome"
+  ) +
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Title
+    plot.title = element_text(
+      size = 7,
+      color = "black",
+      family = my_family,
+      face = "plain",
+      hjust = 0.5,
+      margin = margin(b = 3)
+    ),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      color = "black",
+      family = my_family
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 0, l = 2)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    # Panel spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  ) +
+  guides(
+    fill = guide_legend(
+      keywidth = unit(6, "pt"),
+      keyheight = unit(6, "pt"),
+      ncol = 1,
+      bycol = TRUE,
+      label.position = "right",
+      label.hjust = 0,
+      override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+    )
+  )
+```
+
+View and save
+
+```{r}
+#| echo: true
+#| warning: false
+
+p2_canvas <- p2+ggview::canvas(70,50,units="mm",dpi=900,bg="transparent")
+p2_canvas
+
+#ggsave("dc_dsim.png",p2,width=70, height=50,units="mm",dpi = 1200,bg="transparent")
+```
+
+# Comparison Plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+
+sample_sum <- long_comparison %>%
+  mutate(
+    species = case_when(
+      str_detect(chrom, "_mel$") ~ "mel",
+      str_detect(chrom, "_sim$") ~ "sim",
+      TRUE ~ NA_character_
+    ),
+    chrom_simple = str_remove(chrom, "_(mel|sim)$")
+  ) %>%
+  filter(!is.na(species)) %>%
+  group_by(sample_group, sample, chrom_simple, species) %>%
+  summarise(
+    expr_sum = sum(expression, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+group_stat <- sample_sum %>%
+  group_by(sample_group, chrom_simple, species) %>%
+  summarise(
+    mean_expr = mean(expr_sum),
+    sd_expr   = sd(expr_sum),
+    .groups = "drop"
+  )
+
+plot_df <- group_stat %>%
+  mutate(
+    direction = if_else(species == "mel", -1, 1),
+    mean_plot = mean_expr * direction
+  ) %>%
+  filter(
+    !(species == "mel" & sample_group == "ML82"),
+    !(species == "sim" & sample_group == "Ras3")
+  )
+
+group_name_map <- c(
+  "5A" = "HYC1",
+  "5B" = "HYC2",
+  "6B" = "HYC3",
+  "7B" = "HYC4",
+  "ML82" = "ML82",
+  "Ras3" = "Ras3"
+)
+
+plot_df <- plot_df %>%
+  mutate(
+    sample_group_label = recode(sample_group, !!!group_name_map)
+  )
+
+
+plot_df <- plot_df %>%
+  mutate(
+    chrom_simple = factor(
+      chrom_simple,
+      levels = c("chr2L","chr2R","chr3L","chr3R","chr4","chrX")
+    ),
+    sample_group_label = factor(
+      sample_group_label,
+      levels = c("Ras3","ML82","HYC1","HYC2","HYC3","HYC4")
+    )
+  )
+
+group_colors <- c(
+  "HYC1"   = "#0072B2",  # blue
+  "HYC2"   = "#fb8b05",  # sky blue
+  "HYC3"   = "#ed556a",  # bluish green
+  "HYC4"   = "#56B4E9",  # orange
+  "ML82" = "#CC79A7",  # reddish purple
+  "Ras3" = "#61649F"   # dark purple (no grey)
+)
+
+
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = chrom_simple,
+    y = mean_plot,
+    fill = sample_group_label
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7,
+    color = NA,
+    linewidth = 0.1
+  ) +
+  geom_errorbar(
+    aes(
+      ymin = mean_plot - sd_expr,
+      ymax = mean_plot + sd_expr
+    ),
+    position = position_dodge(width = 0.8),
+    width = 0.2,
+    linewidth = 0.2,
+    color = "black"
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linewidth = 0.1,
+    color = "black"
+  ) +
+  scale_fill_manual(
+    values = group_colors,
+    name = "Sample"
+  ) +
+  scale_y_continuous(
+    breaks = c(
+      -max(abs(plot_df$mean_plot + plot_df$sd_expr), na.rm = TRUE),
+       0,
+       max(abs(plot_df$mean_plot + plot_df$sd_expr), na.rm = TRUE)
+    ),
+    labels = c("D. mel", "0", "D. sim"),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  labs(
+    x = "Chromosome",
+    y = "Summed RNA/DNA-normalized Expression"
+  ) +
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      color = "black",
+      family = my_family
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.y = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 0, l = 2)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    # Panel spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  ) +
+  guides(
+    fill = guide_legend(
+      keywidth = unit(6, "pt"),
+      keyheight = unit(6, "pt"),
+      ncol = 1,
+      bycol = TRUE,
+      label.position = "right",
+      label.hjust = 0,
+      override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+    )
+  )
+
+```
+
+```{r}
+#| echo: true
+#| warning: false
+
+p_canvas <- p+ggview::canvas(90,60,units="mm",dpi=900,bg="transparent")
+p_canvas
+
+#ggsave("dosage_compensation.svg",p,width=90, height=60,units="mm",dpi = 1200)
+```
+
+# Comparison Plot version2
+
+```{r}
+#| echo: true
+#| warning: false
+
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+library(grid)
+
+# 如果你前面没有定义 my_family，就先用 sans
+my_family <- "sans"
+
+# =============================
+# 1. 整理数据
+# =============================
+sample_sum <- long_comparison %>%
+  mutate(
+    species = case_when(
+      str_detect(chrom, "_mel$") ~ "D.mel",
+      str_detect(chrom, "_sim$") ~ "D.sim",
+      TRUE ~ NA_character_
+    ),
+    chrom_simple = str_remove(chrom, "_(mel|sim)$")
+  ) %>%
+  filter(!is.na(species)) %>%
+  group_by(sample_group, sample, chrom_simple, species) %>%
+  summarise(
+    expr_sum = sum(expression, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+group_stat <- sample_sum %>%
+  group_by(sample_group, chrom_simple, species) %>%
+  summarise(
+    mean_expr = mean(expr_sum, na.rm = TRUE),
+    sd_expr   = sd(expr_sum, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# =============================
+# 2. 名称映射和顺序
+# =============================
+group_name_map <- c(
+  "5A"   = "HYC1",
+  "5B"   = "HYC2",
+  "6B"   = "HYC3",
+  "7B"   = "HYC4",
+  "ML82" = "ML82",
+  "Ras3" = "Ras3"
+)
+
+chrom_levels   <- c("chr2L", "chr2R", "chr3L", "chr3R", "chr4", "chrX")
+sample_levels  <- c("Ras3", "ML82", "HYC1", "HYC2", "HYC3", "HYC4")
+species_levels <- c("D.sim", "D.mel")
+
+# =============================
+# 3. complete() 补全所有组合
+# =============================
+plot_df <- group_stat %>%
+  mutate(
+    sample_group_label = recode(sample_group, !!!group_name_map)
+  ) %>%
+  select(sample_group_label, chrom_simple, species, mean_expr, sd_expr) %>%
+  complete(
+    sample_group_label = sample_levels,
+    chrom_simple = chrom_levels,
+    species = species_levels,
+    fill = list(mean_expr = 0, sd_expr = 0)
+  ) %>%
+  mutate(
+    sample_group_label = factor(sample_group_label, levels = sample_levels),
+    chrom_simple = factor(chrom_simple, levels = chrom_levels),
+    species = factor(species, levels = species_levels)
+  ) %>%
+  mutate(
+    mean_expr = case_when(
+      sample_group_label == "ML82" & species == "D.mel" ~ 0,
+      sample_group_label == "Ras3" & species == "D.sim" ~ 0,
+      TRUE ~ mean_expr
+    ),
+    sd_expr = case_when(
+      sample_group_label == "ML82" & species == "D.mel" ~ 0,
+      sample_group_label == "Ras3" & species == "D.sim" ~ 0,
+      TRUE ~ sd_expr
+    )
+  )
+
+# =============================
+# 4. 分上下两个 panel 的数据
+# =============================
+chrom_index <- setNames(seq_along(chrom_levels), chrom_levels)
+
+# ✅ 1. 增大 Chromosome 之间的距离
+# 原来是 0.4；这里改成 0.65
+gap <- 0.3
+
+plot_df_sim <- plot_df %>%
+  filter(species == "D.sim") %>%
+  mutate(
+    ymin = pmax(mean_expr - sd_expr, 0),
+    ymax = mean_expr + sd_expr,
+    x_base = chrom_index[as.character(chrom_simple)],
+    x = x_base * (1 + gap)
+  )
+
+plot_df_mel <- plot_df %>%
+  filter(species == "D.mel") %>%
+  mutate(
+    mean_plot = -mean_expr,
+    ymin = -(mean_expr + sd_expr),
+    ymax = -pmax(mean_expr - sd_expr, 0),
+    x_base = chrom_index[as.character(chrom_simple)],
+    x = x_base * (1 + gap)
+  )
+
+# 统一上下图的绝对范围
+y_abs_max <- max(
+  c(
+    plot_df_sim$ymax,
+    abs(plot_df_mel$ymin)
+  ),
+  na.rm = TRUE
+)
+
+y_breaks <- pretty(c(0, y_abs_max), n = 5)
+y_breaks <- y_breaks[y_breaks >= 0]
+
+# ✅ 2. 增加 Y 轴小刻度数量
+# 数字越大，小刻度越密；21 比较适中，31 更密
+y_minor_breaks <- seq(
+  0,
+  ceiling(y_abs_max / 2000) * 2000,
+  by = 2000
+)
+
+x_breaks <- plot_df_sim %>%
+  distinct(chrom_simple, x) %>%
+  arrange(match(chrom_simple, chrom_levels)) %>%
+  pull(x)
+
+# =============================
+# 5. 颜色
+# =============================
+group_colors <- c(
+  "Ras3" = "#61649F",
+  "ML82" = "#CC79A7",
+  "HYC1" = "#0072B2",
+  "HYC2" = "#fb8b05",
+  "HYC3" = "#ed556a",
+  "HYC4" = "#56B4E9"
+)
+
+# =============================
+# 6. 通用主题
+# =============================
+base_theme <- theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Grid
+    panel.grid = element_blank(),
+    
+    # Border
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.1
+    ),
+    
+    # Avoid double-thick borders
+    axis.line = element_blank(),
+    
+    # Facet labels
+    strip.text.x = element_text(
+      angle = 0,
+      hjust = 0.5,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "italic",
+      margin = margin(t = 1, r = 0, b = 3, l = 0)
+    ),
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      family = my_family,
+      color = "black",
+      face = "italic",
+      margin = margin(t = 0, r = 3, b = 0, l = 1)
+    ),
+    
+    # Axis text
+    axis.text.x = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    
+    # Axis titles
+    axis.title.x = element_text(
+      size = 7,
+      color = "black",
+      family = my_family
+    ),
+    axis.title.y = element_text(
+      size = 7,
+      color = "black",
+      family = my_family,
+      face="italic"
+    ),
+    
+    # Major ticks
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.length = unit(1.5, "pt"),
+    
+    # Minor ticks
+    axis.minor.ticks.x = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.y = element_line(
+      linewidth = 0.1,
+      color = "black"
+    ),
+    axis.minor.ticks.length.x = unit(0.8, "pt"),
+    axis.minor.ticks.length.y = unit(0.8, "pt"),
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 0, l = 2)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    # Facet spacing
+    panel.spacing.x = unit(0.2, "lines"),
+    panel.spacing.y = unit(0.4, "lines"),
+    strip.placement = "outside",
+    strip.switch.pad.grid = unit(0, "pt"),
+    strip.clip = "off",
+    
+    # General text
+    text = element_text(
+      family = my_family,
+      color = "black"
+    ),
+    
+    # Plot margin
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  )
+
+# =============================
+# 7. 上 panel：D.sim
+# =============================
+p_top_core <- ggplot(
+  plot_df_sim,
+  aes(x = x, y = mean_expr, fill = sample_group_label)
+) +
+  geom_col(
+    # ✅ 3. 柱子宽度增加
+    # position_dodge 也同步加大，保证 errorbar 对齐
+    position = position_dodge(width = 1.0),
+    width = 0.9,
+    color = NA,
+    linewidth = 0.1
+  ) +
+  geom_errorbar(
+    aes(ymin = ymin, ymax = ymax),
+    position = position_dodge(width = 1.0),
+    width = 0.16,
+    linewidth = 0.2,
+    color = "black"
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linewidth = 0.05,
+    color = "black"
+  ) +
+  scale_fill_manual(
+    values = group_colors,
+    drop = FALSE,
+    name = "Sample"
+  ) +
+  scale_x_continuous(
+    breaks = x_breaks,
+    labels = chrom_levels,
+    expand = c(0.03, 0.03)
+  ) +
+  scale_y_continuous(
+    limits = c(0, y_abs_max * 1.02),
+    breaks = y_breaks,
+    minor_breaks = y_minor_breaks,
+    expand = c(0, 0),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  labs(x = NULL, y = NULL, fill = "Sample") +
+  base_theme +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.minor.ticks.x = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  )+
+  guides(
+      fill = guide_legend(
+        keywidth = unit(6, "pt"),
+        keyheight = unit(6, "pt"),
+        ncol = 1,
+        bycol = TRUE,
+        label.position = "right",
+        label.hjust = 0,
+        override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+      )
+    )
+
+# =============================
+# 8. 下 panel：D.mel
+# =============================
+p_bottom_core <- ggplot(
+  plot_df_mel,
+  aes(x = x, y = mean_plot, fill = sample_group_label)
+) +
+  geom_col(
+    # ✅ 3. 柱子宽度增加
+    position = position_dodge(width = 1.0),
+    width = 0.9,
+    color = NA,
+    linewidth = 0.1
+  ) +
+  geom_errorbar(
+    aes(ymin = ymin, ymax = ymax),
+    position = position_dodge(width = 1.0),
+    width = 0.16,
+    linewidth = 0.2,
+    color = "black"
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linewidth = 0.05,
+    color = "black"
+  ) +
+  scale_fill_manual(
+    values = group_colors,
+    drop = FALSE,
+    name = "Sample"
+  ) +
+  scale_x_continuous(
+    breaks = x_breaks,
+    labels = chrom_levels,
+    expand = c(0.03, 0.03)
+  ) +
+  scale_y_continuous(
+    limits = c(-y_abs_max * 1.02, 0),
+    breaks = -rev(y_breaks),
+    minor_breaks = -rev(y_minor_breaks),
+    labels = function(x) abs(x),
+    expand = c(0, 0),
+    guide = guide_axis(minor.ticks = TRUE)
+  ) +
+  labs(x = NULL, y = NULL, fill = "Sample") +
+  base_theme +
+  theme(
+    axis.text.x = element_text(
+      size = 6,
+      angle = 0,
+      hjust = 0.5,
+      vjust = 1,
+      family = my_family,
+      color = "black"
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      color = "black",
+      family = my_family
+    ),
+    axis.ticks.x = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    axis.ticks.y = element_line(
+      linewidth = 0.2,
+      color = "black"
+    ),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  )
+
+# =============================
+# 9. 提取统一图例
+# =============================
+legend_plot <- ggplot(
+  plot_df,
+  aes(
+    x = chrom_simple,
+    y = abs(ifelse(species == "D.mel", -mean_expr, mean_expr)),
+    fill = sample_group_label
+  )
+) +
+  geom_col(
+    color = "black",
+    linewidth = 0.1
+  ) +
+  scale_fill_manual(
+    values = group_colors,
+    drop = FALSE,
+    name = "Sample"
+  ) +
+  labs(fill = "Sample") +
+  theme_bw(base_family = my_family) +
+  theme(
+    # Transparent backgrounds
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    strip.background = element_rect(fill = "transparent", color = NA),
+    
+    # Hide plot body
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    
+    # Compact legend
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(
+      size = 6,
+      color = "black",
+      family = my_family,
+      margin = margin(t = 0, r = 0, b = 0, l = 2)
+    ),
+    legend.key.size = unit(6, "pt"),
+    legend.key.width = unit(6, "pt"),
+    legend.key.height = unit(6, "pt"),
+    legend.key.spacing.x = unit(1, "pt"),
+    legend.key.spacing.y = unit(1, "pt"),
+    
+    legend.spacing.x = unit(1, "pt"),
+    legend.spacing.y = unit(1, "pt"),
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    legend.box.spacing = unit(2, "pt"),
+    
+    plot.margin = margin(t = 4, r = 2, b = 0, l = 2)
+  ) +
+  guides(
+    fill = guide_legend(
+      keywidth = unit(6, "pt"),
+      keyheight = unit(6, "pt"),
+      ncol = 1,
+      bycol = TRUE,
+      label.position = "right",
+      label.hjust = 0,
+      override.aes = list(
+        colour = NA,
+        alpha = 0.95
+      )
+    )
+  )
+
+legend_grob <- cowplot::get_legend(legend_plot)
+
+# =============================
+# 10. 上下 panel 拼起来
+# =============================
+panels <- plot_grid(
+  p_top_core,
+  p_bottom_core,
+  ncol = 1,
+  align = "v",
+  rel_heights = c(1, 1)
+)
+
+# =============================
+# 11. 左侧物种标签
+# =============================
+species_labels <- ggdraw() +
+  draw_label(
+    "D.sim",
+    x = 0.95, y = 0.75,
+    hjust = 1,
+    vjust = 0.5,
+    size = 6,
+    fontfamily = my_family,
+    fontface = "italic"
+  ) +
+  draw_label(
+    "D.mel",
+    x = 0.95, y = 0.25,
+    hjust = 1,
+    vjust = 0.5,
+    size = 6,
+    fontfamily = my_family,
+    fontface = "italic"
+  ) +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA)
+  )
+
+# =============================
+# 12. 左侧总 Y 轴标题
+# =============================
+y_title <- ggdraw() +
+  draw_label(
+    "Sum(RNA/DNA)",
+    angle = 90,
+    x = 0.5,
+    y = 0.5,
+    size = 7,
+    fontfamily = my_family,
+  ) +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA)
+  )
+
+# =============================
+# 13. 底部总 X 轴标题
+# =============================
+x_title <- ggdraw() +
+  draw_label(
+    "Chromosome",
+    x = 0.5,
+    y = 0.5,
+    size = 7,
+    fontfamily = my_family
+  ) +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA)
+  )
+
+# =============================
+# 14. 主体拼接：Y标题 + 物种标签 + panel + legend
+# =============================
+main_row <- plot_grid(
+  y_title,
+  species_labels,
+  panels,
+  legend_grob,
+  ncol = 4,
+  rel_widths = c(0.06, 0.06, 1, 0.14),
+  align = "h"
+)
+
+# =============================
+# 15. 最终图：再加底部 X 标题
+# =============================
+final_plot <- plot_grid(
+  main_row,
+  x_title,
+  ncol = 1,
+  rel_heights = c(1, 0.06)
+)
+
+final_plot <- ggdraw(final_plot) +
+  theme(
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    plot.margin = margin(t = 4, r = 0, b = 0, l = 0)
+  )
+
+```
+
+Save the plot
+
+```{r}
+#| echo: true
+#| warning: false
+
+final_canvas <- final_plot + ggview::canvas(90,60,units="mm",dpi=1200,bg="transparent")
+
+final_canvas
+
+#ggsave("Fig3C.pdf",final_plot,width = 90,height = 60,units="mm",dpi=900,bg = "transparent")
+```
+
+# Write some tables out
+
+```{r}
+#| echo: true
+#| warning: false
+
+new_table <- data_genome_normalized[, c("Gene", setdiff(names(data_genome_normalized),c("Chrom", "Start", "End", "Gene"))),with = FALSE]
+
+# 写出
+write.csv(new_table,file = "genome_coverage_matrix.csv",row.names = FALSE)
+
+```
+
+## transcriptome
+
+```{r}
+dt <- copy(data_transcriptome_normalized)
+
+# 所有rep列名
+rep_cols <- grep("_rep", names(dt), value = TRUE)
+
+# 提取样本名（去掉 _repX）
+sample_names <- unique(sub("_rep[0-9]+", "", rep_cols))
+
+for (s in sample_names) {
+  
+  cols <- grep(paste0("^", s, "_rep"), names(dt), value = TRUE)
+  
+  dt[, (s) := rowMeans(.SD, na.rm = TRUE), .SDcols = cols]
+}
+
+mean_table <- dt[, c("gene_id", sample_names), with = FALSE]
+
+fwrite(mean_table, "transcriptome.csv")
+
+```
+
+## comparison
+
+```{r}
+dt <- copy(comparison)
+
+rep_cols <- grep("_rep", names(dt), value = TRUE)
+
+sample_names <- unique(sub("_rep[0-9]+", "", rep_cols))
+
+for (s in sample_names) {
+  
+  cols <- grep(paste0("^", s, "_rep"), names(dt), value = TRUE)
+  
+  dt[, (s) := rowMeans(.SD, na.rm = TRUE), .SDcols = cols]
+}
+
+mean_table <- dt[, c("chrom", "start", "end", "gene", sample_names),
+                 with = FALSE]
+
+mean_table <- dt[, c("chrom", "start", "end", "gene", sample_names),
+                 with = FALSE]
+
+fwrite(mean_table, "comparison_sample_means.csv")
+```
