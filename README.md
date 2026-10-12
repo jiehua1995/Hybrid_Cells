@@ -30,20 +30,6 @@ Support scripts:
 - `Fig3d_ExtFig7/Fig3d_Org_DB.qmd` — builds the orthogroup-GO annotation package used by Fig. 3d / Extended Data Fig. 7.
 - `ExtFig1/ExtFig1_Build_BSgenome.R` — builds the BSgenome data package for the Ras3 assembly.
 
-## Running the notebooks
-
-Each notebook defines a `machine` switch near the top of its first code chunk:
-
-```r
-machine <- "home"   # "home" or "lab"
-```
-
-Set `machine` to match the computer you are running on; the switch selects the matching set of input-data paths. Input data are only read, never written.
-
-All figure/table outputs are commented out by default, so running the chunks does not write any file. To export a specific figure or table, uncomment the corresponding `ggsave()` / `fwrite()` line in the notebook and run it manually. The notebooks are intended to be run chunk by chunk.
-
-R is installed at `C:\Software\R` and Quarto at `C:\Software\Quarto` (not on the system PATH).
-
 ## Repository status
 
 The associated manuscript is currently in preparation or under review. The notebooks and repository structure may therefore be updated before publication.
