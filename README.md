@@ -1,4 +1,4 @@
-# Constrained resolution of genomic incompatibility in hybrid *Drosophila* cell lines
+# Speciation in reverse: hybrid *Drosophila* cell lines reveal the hierarchy of genomic incompatibility
 
 This repository contains the R/Quarto notebooks used for data analysis and figure generation for a study of *Drosophila melanogaster* x *Drosophila simulans* hybrid cell lines.
 
