@@ -1,0 +1,1904 @@
+---
+title: "Fig. 5 / Extended Data Fig. 9"
+author: "Jie Hua"
+date: 2026-10-02
+lang: en
+format:
+  html:
+    theme: cosmo
+    page-layout: full
+    toc: true
+    toc-location: left
+    section-divs: true
+    code-fold: true
+    code-overflow: wrap
+    code-line-numbers: true
+    code-copy: hover
+    number-sections: true
+    highlight-style: tango
+editor: visual
+---
+
+This notebook produces **Fig. 5** (parental protein-to-RNA relationships predict proteome output in hybrid cells) and **Extended Data Fig. 9** (support).
+
+# Configuration
+
+```{r}
+#| label: config
+#| warning: false
+#| message: false
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(tibble)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(ggplot2)
+  library(ggdist)
+  library(ggVennDiagram)
+  library(ggrepel)
+  library(ggpointdensity)
+  library(ggrastr)
+  library(cowplot)
+  library(cocor)
+  library(scales)
+  library(grid)
+  library(knitr)
+  library(Biostrings)
+  library(stringi)
+  library(ggview)
+})
+
+## Transparent background for every rendered figure.
+knitr::opts_chunk$set(dev.args = list(bg = "transparent"))
+
+## ggview opens a figure in the RStudio viewer. When the notebook is rendered
+## from the command line there is no viewer, so printing a canvas must be a no-op.
+if (!requireNamespace("rstudioapi", quietly = TRUE) || !rstudioapi::isAvailable()) {
+  try(assignInNamespace("print.ggview", function(x, ...) invisible(x), ns = "ggview"), silent = TRUE)
+}
+
+## =========================
+## 1. Paths
+## =========================
+machine <- "home"   # "home" or "lab"
+
+if (machine == "home") {
+
+  folder <- "F:\\Big Paper\\Processed data\\20250825 Ref10812_Proteome Data of Hybrid Cells\\Ref10812_HuaJie_20250704_mycomputer"
+  ortholog_file <- "F:\\Big Paper\\Processed data\\Fig3_Dosage and Transcriptome\\dmel_dsim_orthofinder\\Orthogroups.tsv"
+  gtf_file <- "F:\\Big Paper\\Processed data\\Fig3_Dosage and Transcriptome\\transcriptome\\All.extended_annotation.gtf"
+  normalized_transcriptome_file <- "F:\\Big Paper\\Processed data\\Fig3_Dosage and Transcriptome\\transcriptome\\NormalizedTranscriptomeCountsData.csv"
+  orthofinder_gene_file <- "F:\\Big Paper\\Processed data\\Fig3_Dosage and Transcriptome\\orthofinder_gene.csv"
+  protein_faa <- "F:\\Hybrid Cells Paper Processed Paper\\Supplementary Files\\Data S5 Predicted protein sequences from the combined D. melanogaster–D. simulans hybrid reference genome.faa"
+
+} else if (machine == "lab") {
+
+  folder <- "H:\\MS_data\\Ref10812_HuaJie_20250704_mycomputer"
+  ortholog_file <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome\\dmel_dsim_orthofinder\\Orthogroups.tsv"
+  gtf_file <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome\\transcriptome\\All.extended_annotation.gtf"
+  normalized_transcriptome_file <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome\\transcriptome\\NormalizedTranscriptomeCountsData.csv"
+  orthofinder_gene_file <- "H:\\HybridCells_Data\\Fig3_Dosage and Transcriptome\\orthofinder_gene.csv"
+  protein_faa <- "Z:\\AIG\\jhua\\Paper_Hybrid_Cells_current\\Manuscript prefinal\\Supplementary Files\\Data S5 Predicted protein sequences from the combined D. melanogaster–D. simulans hybrid reference genome.faa"
+
+} else {
+  stop("machine must be either 'home' or 'lab'")
+}
+
+## =========================
+## 2. Analysis settings
+## =========================
+
+parent_rep_cols <- c(
+  "Ras3_r1", "Ras3_r2", "Ras3_r3",
+  "ML82_r1", "ML82_r2", "ML82_r3"
+)
+
+parent_groups <- c("Ras3", "ML82")
+
+## Proteome hybrid libraries HYC1-4 correspond to the RNA hybrid libraries 5A/5B/6B/7B.
+hyc_line_map <- c(HYC1 = "5A", HYC2 = "5B", HYC3 = "6B", HYC4 = "7B")
+hyc_protein_groups <- names(hyc_line_map)
+
+sample_order <- c("Ras3", "ML82", "HYC1", "HYC2", "HYC3", "HYC4")
+
+## Require at least this many distinct common peptide sequences per orthogroup.
+min_common_peptides <- 2L
+
+## Each common peptide must be detected in BOTH parents (>= this many replicates).
+require_detected_in_both_parents <- TRUE
+min_detected_reps_per_parent <- 1L
+
+## Minimum normalized RNA (per parent) for an orthogroup to enter the K table.
+min_rna_each_parent <- 1
+
+## Collapse identical (mel_gene, sim_gene) pairs occurring in several 1:1 orthogroups.
+deduplicate_gene_pairs <- TRUE
+
+## Number of extreme orthogroups labelled from each tail.
+top_n_each_tail <- 10L
+
+## Minimum number of orthogroups for a correlation to be reported.
+min_n <- 5L
+
+save_outputs <- TRUE
+
+## Genes highlighted in the figures.
+selected_gene_table <- data.table(
+  selected_label = c(
+    "Hmr", "Lhr", "Boh1", "Boh2", "Nlp", "Nph", "gfzf",
+    "Nup98-96", "cid", "msl-2", "mof", "msl-3", "mle"
+  ),
+  mel_gene = c(
+    "FBgn0001206", "FBgn0034217", "FBgn0053213", "FBgn0032354",
+    "FBgn0016685", "FBgn0039735", "FBgn0250732", "FBgn0039120",
+    "FBgn0040477", "FBgn0005616", "FBgn0014340", "FBgn0002775",
+    "FBgn0002774"
+  )
+)
+
+## =========================
+## 3. Style (same as the Fig5 proteome panel figures)
+## =========================
+
+## ---------------------------------------------------------------------------
+## Colour palette. Six colours are used throughout the notebook, always in the
+## same role, so that the same quantity has the same colour in every figure:
+##
+##   mel side / mel-higher-K        #FCA104  (orange)
+##   sim side / sim-higher-K        #2F6DB3  (blue)
+##   fitted line / highlight        #E56C57  (red)
+##   hybrid line / accent           #5200A6  (purple)
+##   hybrid line / accent           #CDB742  (gold)
+##   full model / accent            #45A6B2  (teal)
+## ---------------------------------------------------------------------------
+pal_orange <- "#FCA104"
+pal_blue   <- "#2F6DB3"
+pal_red    <- "#E56C57"
+pal_purple <- "#5200A6"
+pal_gold   <- "#CDB742"
+pal_teal   <- "#45A6B2"
+
+## Gradient used for point-density scatter plots and the Venn fill: teal -> gold -> purple.
+density_colours <- c(pal_teal, pal_gold, pal_purple)
+
+## Per-hybrid-line colours, reusing the same six colours.
+group_colours <- c(
+  Ras3 = pal_orange, ML82 = pal_blue,
+  HYC1 = pal_teal, HYC2 = pal_gold, HYC3 = pal_purple, HYC4 = pal_red
+)
+
+r2_colours <- c("white", pal_blue)
+
+## Layout constants for the supporting figures (same values as the original panel notebook).
+r2_text_size <- 7
+panel_gap_pt <- 2
+legend_bar_width_pt <- 5
+legend_bar_height_pt <- 22
+legend_column_width <- 0.11
+
+axis_text_size <- 6
+axis_title_size <- 7
+sample_label_size <- 7
+legend_title_size <- 6
+legend_text_size <- 6
+point_size <- 0.5
+point_alpha <- 0.35
+fit_colour <- pal_red
+full_colour <- pal_teal
+
+theme_fig <- function() {
+  theme_bw(base_family = "sans") +
+    theme(
+      plot.background = element_rect(fill = "transparent", colour = NA),
+      panel.background = element_rect(fill = "transparent", colour = NA),
+      plot.title = element_text(size = 7, colour = "black", family = "sans", hjust = 0.5, face = "plain", margin = margin(b = 2, t = 0)),
+      legend.background = element_rect(fill = "transparent", colour = NA),
+      legend.box.background = element_rect(fill = "transparent", colour = NA),
+      legend.key = element_rect(fill = "transparent", colour = NA),
+      panel.grid = element_blank(),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.1),
+      axis.line = element_blank(),
+      axis.text = element_text(size = axis_text_size, colour = "black", family = "sans"),
+      axis.title.x = element_text(size = axis_title_size, colour = "black", family = "sans", margin = margin(t = 3)),
+      axis.title.y = element_text(size = axis_title_size, colour = "black", family = "sans", margin = margin(r = 3)),
+      axis.ticks = element_line(linewidth = 0.2, colour = "black"),
+      axis.ticks.length = unit(1.5, "pt"),
+      strip.background = element_blank(),
+      strip.text = element_text(size = sample_label_size, colour = "black", family = "sans", margin = margin(t = 1, r = 0, b = 2, l = 0)),
+      legend.title = element_text(size = legend_title_size, colour = "black", family = "sans"),
+      legend.text = element_text(size = legend_text_size, colour = "black", family = "sans", margin = margin(t = 0, r = 0, b = 0, l = 2)),
+      legend.key.size = unit(6, "pt"),
+      legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0),
+      plot.margin = margin(t = 3, r = 4, b = 3, l = 4)
+    )
+}
+
+theme_paper <- theme_fig()
+
+sum_na <- function(x) if (all(is.na(x))) NA_real_ else sum(x, na.rm = TRUE)
+mean_na <- function(x) if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
+```
+
+# Read the peptide matrix
+
+```{r}
+#| label: read-proteome
+#| warning: false
+#| message: false
+
+raw_pr <- fread(file.path(folder, "report.pr_matrix.tsv"))
+meta <- fread(file.path(folder, "report-samples.csv"))
+
+stopifnot("Stripped.Sequence" %in% names(raw_pr))
+stopifnot("Protein.Ids" %in% names(raw_pr))
+stopifnot(all(c("Name", "Sample") %in% names(meta)))
+
+## DIA-NN intensity columns start at column 11.
+sample_idx <- 11:ncol(raw_pr)
+
+clean_raw_name <- function(x) sub("\\.raw$", "", basename(x), ignore.case = TRUE)
+
+raw_names_clean <- clean_raw_name(names(raw_pr)[sample_idx])
+meta_names_clean <- clean_raw_name(meta$Name)
+
+mapped_names <- meta$Sample[match(raw_names_clean, meta_names_clean)]
+
+if (anyNA(mapped_names)) {
+  stop(
+    "Could not map these DIA-NN sample columns through report-samples.csv: ",
+    paste(raw_names_clean[is.na(mapped_names)], collapse = ", ")
+  )
+}
+
+setnames(raw_pr, old = names(raw_pr)[sample_idx], new = mapped_names)
+
+missing_parent_cols <- setdiff(parent_rep_cols, names(raw_pr))
+if (length(missing_parent_cols) > 0) {
+  stop("Missing parental proteome columns: ", paste(missing_parent_cols, collapse = ", "))
+}
+
+hyc_protein_cols <- grep("^HYC[1-4]_(r|rep)[0-9]+$", names(raw_pr), value = TRUE)
+stopifnot(length(hyc_protein_cols) == 12L)
+
+cat("Precursor rows:", nrow(raw_pr), "\n")
+cat("Distinct stripped peptide sequences:", uniqueN(raw_pr$Stripped.Sequence), "\n")
+cat("Parental columns:", paste(parent_rep_cols, collapse = ", "), "\n")
+cat("Hybrid columns:", paste(hyc_protein_cols, collapse = ", "), "\n")
+```
+
+# Peptide detection overlap between the parental lines and the hybrid cells
+
+```{r}
+#| label: panel-a-venn
+#| warning: false
+#| fig-width: 3.35
+#| fig-height: 2.62
+
+## Replicate columns of each of the three groups.
+ras3_cols <- grep("^Ras3_r[0-9]+$", names(raw_pr), value = TRUE)
+ml82_cols <- grep("^ML82_r[0-9]+$", names(raw_pr), value = TRUE)
+
+## TRUE for a precursor row when at least one column of `cols` is positive.
+## NA (not quantified) is set to 0 first so that it never counts as detected.
+det_any <- function(dt, cols) {
+  m <- as.matrix(dt[, ..cols])
+  m[is.na(m)] <- 0
+  rowSums(m > 0) > 0
+}
+
+## Detection is evaluated per precursor row: one row per stripped sequence,
+## charge state and modification.
+raw_pr[, in_Ras3 := det_any(raw_pr, ras3_cols)]
+raw_pr[, in_ML82 := det_any(raw_pr, ml82_cols)]
+raw_pr[, in_HYC  := det_any(raw_pr, hyc_protein_cols)]
+
+## One identifier per precursor row; this is the counting unit of Panel a.
+raw_pr[, peptide_id := paste0("Precursor_", .I)]
+
+total_peptides <- nrow(raw_pr)
+
+## Distinct sequences, reported only as a reference number.
+total_sequences <- uniqueN(raw_pr$Stripped.Sequence)
+
+## Assign every precursor row to exactly one of the seven Venn regions.
+pep_region <- raw_pr[
+  ,
+  .(
+    region = fcase(
+      in_Ras3 & in_ML82 & in_HYC, "Ras3+ML82+HYC",
+      in_Ras3 & in_ML82,          "Ras3+ML82",
+      in_Ras3 & in_HYC,           "Ras3+HYC",
+      in_ML82 & in_HYC,           "ML82+HYC",
+      in_Ras3,                    "Ras3 only",
+      in_ML82,                    "ML82 only",
+      default =                   "HYC only"
+    )
+  )
+]
+
+## Sets passed to the Venn diagram; elements are precursor rows.
+venn_list_3 <- list(
+  Ras3   = raw_pr[in_Ras3 == TRUE, peptide_id],
+  ML82   = raw_pr[in_ML82 == TRUE, peptide_id],
+  Hybrid = raw_pr[in_HYC == TRUE, peptide_id]
+)
+
+p_venn3 <- ggVennDiagram(
+  venn_list_3,
+  label_alpha = 0, label = "count",
+  edge_color = "black", edge_size = 0.2,
+  set_size = 6 / ggplot2::.pt, label_size = 6 / ggplot2::.pt
+) +
+  scale_fill_gradient(
+    low = pal_teal, high = pal_blue, name = "Count",
+    breaks = scales::breaks_pretty(n = 4)
+  ) +
+  theme_void(base_family = "sans") +
+  theme(
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    legend.position = "right",
+    legend.title = element_text(size = 6, color = "black", family = "sans", margin = margin(b = 3)),
+    legend.text = element_text(size = 6, color = "black", family = "sans", margin = margin(l = 3)),
+    plot.margin = margin(t = 0, r = 2, b = 0, l = 2)
+  ) +
+  guides(fill = guide_colorbar(
+    title.position = "top", title.hjust = 0.5,
+    barwidth = unit(6, "pt"), barheight = unit(36, "pt"),
+    frame.colour = "black", frame.linewidth = 0.1
+  ))
+
+p_venn3
+```
+
+```{r}
+#| label: save-panel-a-venn
+#| warning: false
+
+p_venn3 + ggview::canvas(width = 50, height = 60, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelA_peptide_overlap.pdf"), p_venn3, dpi = 1200, units = "mm", width = 50, height = 60, bg = "transparent")
+```
+
+```{r}
+#| label: panel-a-counts
+#| warning: false
+
+pep_region_counts <- pep_region[
+  ,
+  .N,
+  by = region
+][order(-N)]
+
+pep_region_counts <- rbind(
+  pep_region_counts,
+  data.table(region = "TOTAL precursor rows (Panel a unit)", N = total_peptides),
+  data.table(region = "TOTAL distinct sequences (reference)", N = total_sequences)
+)
+
+panel_a_table <- pep_region_counts
+panel_a_table
+```
+
+```{r}
+#| label: panel-a-curves
+#| warning: false
+#| fig-width: 3.35
+#| fig-height: 2.62
+
+det_bar_dt <- pep_region[region != "Ras3+ML82+HYC", .N, by = region][order(-N)]
+det_bar_dt[, region := factor(region, levels = region)]
+
+p_det_bar <- ggplot(det_bar_dt, aes(x = region, y = N)) +
+  geom_col(fill = full_colour, colour = "black", linewidth = 0.1) +
+  labs(x = NULL, y = "Peptide sequences") +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+p_det_bar
+```
+
+# Global structure of the proteome samples (precursor-level PCA)
+
+```{r}
+#| label: peptide-pca
+#| warning: false
+#| fig-width: 3.15
+#| fig-height: 2.60
+
+pca_sample_cols <- c(ras3_cols, ml82_cols, hyc_protein_cols)
+
+## log2 intensities; every missing or non-positive value becomes 0 (not detected).
+pca_expr <- as.matrix(raw_pr[, ..pca_sample_cols])
+mode(pca_expr) <- "numeric"
+pca_expr[pca_expr <= 0] <- NA_real_
+pca_expr <- log2(pca_expr)
+pca_expr[!is.finite(pca_expr)] <- 0
+
+## Drop precursors that do not vary across the 18 samples (zero variance).
+pca_sd <- apply(pca_expr, 1, sd)
+pca_expr <- pca_expr[is.finite(pca_sd) & pca_sd > 0, , drop = FALSE]
+
+## Samples are the rows of the transposed matrix: one point per sample.
+pca_res <- prcomp(t(pca_expr), center = TRUE, scale. = TRUE)
+pca_var <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+pca_df <- as.data.frame(pca_res$x[, 1:2, drop = FALSE])
+pca_df$Sample <- rownames(pca_df)
+pca_df$Group <- factor(sub("_r[0-9]+$", "", pca_df$Sample), levels = sample_order)
+
+p_pca <- ggplot(pca_df, aes(x = PC1, y = PC2, colour = Group)) +
+  geom_point(size = 1.8, alpha = 0.9, stroke = 0.2) +
+  ggrepel::geom_text_repel(
+    aes(label = Sample), size = 1.7, family = "sans", colour = "black",
+    max.overlaps = Inf, box.padding = 0.25, point.padding = 0.1,
+    min.segment.length = 0.2, segment.colour = "grey60", segment.size = 0.2,
+    seed = 123, show.legend = FALSE
+  ) +
+  scale_colour_manual(
+    values = group_colours, breaks = sample_order, limits = sample_order,
+    drop = FALSE, name = "Group"
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.08, 0.08))) +
+  scale_y_continuous(expand = expansion(mult = c(0.12, 0.12))) +
+  labs(x = sprintf("PC1 (%.1f%%)", 100 * pca_var[1]), y = sprintf("PC2 (%.1f%%)", 100 * pca_var[2])) +
+  coord_cartesian(clip = "off") +
+  theme_paper
+
+p_pca
+```
+
+```{r}
+#| label: save-panel-a-pca
+#| warning: false
+
+p_pca + ggview::canvas(width = 80, height = 66, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelA_peptide_PCA.pdf"), p_pca, dpi = 1200, units = "mm", width = 80, height = 66, bg = "transparent")
+```
+
+# Strict 1:1 orthogroups
+
+```{r}
+#| label: strict-one-to-one
+#| warning: false
+
+orthofinder_gene <- fread(orthofinder_gene_file)
+
+required_og_cols <- c(
+  "Orthogroup",
+  "isoquant_split.mel.pep.nostar",
+  "isoquant_split.sim.pep.nostar"
+)
+stopifnot(all(required_og_cols %in% names(orthofinder_gene)))
+
+split_members <- function(x) {
+  if (length(x) == 0 || is.na(x) || trimws(x) == "") return(character(0))
+  y <- trimws(unlist(strsplit(x, ",", fixed = TRUE)))
+  y[!is.na(y) & y != "" & y != "NA"]
+}
+
+og_1to1 <- rbindlist(
+  lapply(seq_len(nrow(orthofinder_gene)), function(i) {
+    mel <- split_members(orthofinder_gene[["isoquant_split.mel.pep.nostar"]][i])
+    sim <- split_members(orthofinder_gene[["isoquant_split.sim.pep.nostar"]][i])
+    if (length(mel) == 1L && length(sim) == 1L) {
+      data.table(Orthogroup = orthofinder_gene$Orthogroup[i], mel_gene = mel, sim_gene = sim)
+    } else {
+      NULL
+    }
+  }),
+  use.names = TRUE
+)
+
+og_1to1 <- unique(og_1to1, by = "Orthogroup")
+
+cat("Strict 1:1 mel-sim orthogroups:", nrow(og_1to1), "\n")
+```
+
+# Gene symbols and descriptions
+
+```{r}
+#| label: gene-annotation
+#| warning: false
+#| message: false
+
+gtf_lines <- readLines(gtf_file, warn = FALSE)
+gtf_lines <- gtf_lines[!startsWith(gtf_lines, "#")]
+gtf <- fread(
+  text = gtf_lines,
+  sep = "\t", header = FALSE, quote = "", fill = TRUE
+)
+
+setnames(gtf, c("chr", "source", "type", "start", "end", "score", "strand", "frame", "attributes"))
+
+gene_anno <- gtf[type == "gene"]
+gene_anno[, gene_id := str_match(attributes, 'gene_id "([^"]+)"')[, 2]]
+gene_anno[, gene_symbol := str_match(attributes, 'gene_symbol "([^"]+)"')[, 2]]
+gene_anno[is.na(gene_symbol) | gene_symbol == "", gene_symbol := gene_id]
+
+gene_anno <- unique(
+  gene_anno[!is.na(gene_id) & gene_id != "", .(gene_id, gene_symbol, chr, start, end, strand)],
+  by = "gene_id"
+)
+
+og_1to1[gene_anno, on = .(mel_gene = gene_id), `:=`(mel_symbol = i.gene_symbol, mel_chr = i.chr)]
+og_1to1[gene_anno, on = .(sim_gene = gene_id), `:=`(sim_symbol = i.gene_symbol, sim_chr = i.chr)]
+
+og_1to1[is.na(mel_symbol) | mel_symbol == "", mel_symbol := mel_gene]
+og_1to1[is.na(sim_symbol) | sim_symbol == "", sim_symbol := sim_gene]
+
+## Optional FlyBase description.
+og_1to1[, gene_description := NA_character_]
+
+if (requireNamespace("AnnotationDbi", quietly = TRUE) &&
+    requireNamespace("org.Dm.eg.db", quietly = TRUE)) {
+  suppressMessages({
+    ann_db <- AnnotationDbi::select(
+      org.Dm.eg.db::org.Dm.eg.db,
+      keys = unique(og_1to1$mel_gene),
+      keytype = "FLYBASE",
+      columns = c("SYMBOL", "GENENAME")
+    )
+  })
+  ann_db <- as.data.table(ann_db)
+  ann_db <- ann_db[
+    !is.na(FLYBASE),
+    .(
+      annotation_symbol = {
+        z <- unique(SYMBOL[!is.na(SYMBOL) & SYMBOL != ""])
+        if (length(z) == 0) NA_character_ else z[1]
+      },
+      gene_description = {
+        z <- unique(GENENAME[!is.na(GENENAME) & GENENAME != ""])
+        if (length(z) == 0) NA_character_ else z[1]
+      }
+    ),
+    by = FLYBASE
+  ]
+  og_1to1[ann_db, on = .(mel_gene = FLYBASE), gene_description := i.gene_description]
+}
+
+og_1to1[selected_gene_table, on = "mel_gene", selected_label := i.selected_label]
+og_1to1[, selected_gene := !is.na(selected_label)]
+
+cat(
+  "Selected genes represented among strict 1:1 orthogroups:",
+  sum(og_1to1$selected_gene), "/", nrow(selected_gene_table), "\n"
+)
+```
+
+# Map peptides to orthogroups
+
+```{r}
+#| label: peptide-og-map
+#| warning: false
+
+ortholog <- fread(ortholog_file)
+
+protein_cols <- c("isoquant_split.mel.pep.nostar", "isoquant_split.sim.pep.nostar")
+stopifnot(all(c("Orthogroup", protein_cols) %in% names(ortholog)))
+
+orthogroup_long <- melt(
+  ortholog,
+  id.vars = "Orthogroup",
+  measure.vars = protein_cols,
+  variable.name = "Source",
+  value.name = "ProteinID_list",
+  na.rm = TRUE
+)
+
+orthogroup_long <- orthogroup_long[!is.na(ProteinID_list) & trimws(ProteinID_list) != ""]
+
+orthogroup_map <- orthogroup_long[
+  ,
+  .(ProteinID = trimws(unlist(strsplit(ProteinID_list, ",", fixed = TRUE)))),
+  by = Orthogroup
+]
+orthogroup_map <- unique(
+  orthogroup_map[!is.na(ProteinID) & ProteinID != "", .(ProteinID, Orthogroup)]
+)
+
+peptide_base <- raw_pr[
+  ,
+  c("Protein.Ids", "Stripped.Sequence", parent_rep_cols, hyc_protein_cols),
+  with = FALSE
+]
+peptide_base[, pep_id := .I]
+
+peptide_id_long <- peptide_base[
+  ,
+  .(ProteinID = trimws(unlist(strsplit(Protein.Ids, ";", fixed = TRUE)))),
+  by = pep_id
+]
+peptide_id_long <- unique(peptide_id_long[!is.na(ProteinID) & ProteinID != "", .(pep_id, ProteinID)])
+
+matched_ids <- merge(peptide_id_long, orthogroup_map, by = "ProteinID", all.x = TRUE, allow.cartesian = TRUE)
+pep_og <- unique(matched_ids[!is.na(Orthogroup) & Orthogroup != "", .(pep_id, Orthogroup)])
+
+## Restrict to strict 1:1 orthogroups.
+pep_og <- pep_og[Orthogroup %in% og_1to1$Orthogroup]
+
+cat("Peptide rows mapped to a strict 1:1 orthogroup:", uniqueN(pep_og$pep_id), "\n")
+cat("Peptide x strict-1:1-orthogroup pairs:", nrow(pep_og), "\n")
+```
+
+# Define common peptides
+
+```{r}
+#| label: common-peptide-definition
+#| warning: false
+#| message: false
+
+prot_set <- Biostrings::readAAStringSet(protein_faa)
+prot_seq_lookup <- setNames(as.character(prot_set), sub(" .*$", "", names(prot_set)))
+
+cat("Protein sequences in FASTA:", length(prot_seq_lookup), "\n")
+
+side_strings <- function(src) {
+  ids <- orthogroup_long[
+    Source == src & Orthogroup %in% og_1to1$Orthogroup,
+    .(Orthogroup, ProteinID_list)
+  ]
+  ids[
+    ,
+    side_str := vapply(
+      strsplit(ProteinID_list, ",", fixed = TRUE),
+      function(v) {
+        v <- trimws(v)
+        v <- v[!is.na(v) & v != ""]
+        seqs <- prot_seq_lookup[v]
+        seqs <- seqs[!is.na(seqs)]
+        if (length(seqs) == 0) "" else paste(seqs, collapse = "*")
+      },
+      character(1)
+    )
+  ]
+  setNames(ids$side_str, ids$Orthogroup)
+}
+
+og_mel_str <- side_strings("isoquant_split.mel.pep.nostar")
+og_sim_str <- side_strings("isoquant_split.sim.pep.nostar")
+
+pep_common <- merge(
+  pep_og,
+  peptide_base[, c("pep_id", "Stripped.Sequence", parent_rep_cols, hyc_protein_cols), with = FALSE],
+  by = "pep_id", all.x = TRUE
+)
+
+pep_common[, side_mel := stringi::stri_detect_fixed(og_mel_str[Orthogroup], Stripped.Sequence)]
+pep_common[, side_sim := stringi::stri_detect_fixed(og_sim_str[Orthogroup], Stripped.Sequence)]
+pep_common[is.na(side_mel), side_mel := FALSE]
+pep_common[is.na(side_sim), side_sim := FALSE]
+
+pep_common[, is_common := side_mel & side_sim]
+
+common_only <- pep_common[is_common == TRUE]
+
+cat("Common peptide x orthogroup pairs:", nrow(common_only), "\n")
+cat("Strict 1:1 orthogroups with >=1 common peptide:", uniqueN(common_only$Orthogroup), "\n")
+cat("Distinct common peptide sequences:", uniqueN(common_only$Stripped.Sequence), "\n")
+```
+
+# Parent-detection filter
+
+```{r}
+#| label: paired-detection-option
+#| warning: false
+
+detect_cols <- function(dt, cols) {
+  m <- as.matrix(dt[, ..cols])
+  m[is.na(m)] <- 0
+  rowSums(m > 0)
+}
+
+common_only[, detect_Ras3 := detect_cols(common_only, grep("^Ras3_r[0-9]+$", names(common_only), value = TRUE))]
+common_only[, detect_ML82 := detect_cols(common_only, grep("^ML82_r[0-9]+$", names(common_only), value = TRUE))]
+
+if (require_detected_in_both_parents) {
+  common_only <- common_only[
+    detect_Ras3 >= min_detected_reps_per_parent &
+    detect_ML82 >= min_detected_reps_per_parent
+  ]
+  cat("Detection filter ON - common peptides retained:", nrow(common_only), "\n")
+} else {
+  cat("Detection filter OFF (sensitivity analysis).\n")
+}
+```
+
+# Common-peptide QC
+
+```{r}
+#| label: common-peptide-qc
+#| warning: false
+
+common_qc <- common_only[
+  ,
+  .(
+    n_common_rows = .N,
+    n_common_peptide_sequences = uniqueN(Stripped.Sequence),
+    n_common_detected_Ras3 = uniqueN(Stripped.Sequence[detect_Ras3 > 0]),
+    n_common_detected_ML82 = uniqueN(Stripped.Sequence[detect_ML82 > 0]),
+    n_common_detected_both = uniqueN(Stripped.Sequence[detect_Ras3 > 0 & detect_ML82 > 0])
+  ),
+  by = Orthogroup
+]
+
+eligible_ogs <- common_qc[n_common_peptide_sequences >= min_common_peptides, Orthogroup]
+
+cat("Orthogroups passing >=", min_common_peptides, "common peptide sequences:", length(eligible_ogs), "\n")
+summary(common_qc$n_common_peptide_sequences)
+```
+
+# Orthogroup-level protein from common peptides
+
+```{r}
+#| label: orthogroup-protein
+#| warning: false
+
+common_for_protein <- common_only[Orthogroup %in% eligible_ogs]
+
+normalise_reps <- function(wide) {
+  medians <- vapply(
+    setdiff(names(wide), "Orthogroup"),
+    function(cc) {
+      x <- wide[[cc]]
+      median(x[is.finite(x) & x > 0], na.rm = TRUE)
+    },
+    numeric(1)
+  )
+  if (any(!is.finite(medians) | medians <= 0)) {
+    stop("Invalid normalisation median in at least one replicate.")
+  }
+  out <- copy(wide)
+  for (cc in names(medians)) out[, (cc) := get(cc) / medians[[cc]]]
+  list(norm = out, medians = medians)
+}
+
+## --- parental ---
+protein_rep <- common_for_protein[, lapply(.SD, sum_na), by = Orthogroup, .SDcols = parent_rep_cols]
+prot_norm <- normalise_reps(protein_rep)
+protein_rep_norm <- prot_norm$norm
+protein_medians <- prot_norm$medians
+
+protein_reps <- copy(protein_rep_norm)
+setnames(
+  protein_reps, parent_rep_cols,
+  c(paste0("Protein_Ras3_rep", 1:3), paste0("Protein_ML82_rep", 1:3))
+)
+
+protein_parent <- protein_rep_norm[
+  ,
+  .(
+    Protein_Ras3 = mean_na(c(Ras3_r1, Ras3_r2, Ras3_r3)),
+    Protein_ML82 = mean_na(c(ML82_r1, ML82_r2, ML82_r3)),
+    n_Protein_Ras3 = sum(is.finite(c(Ras3_r1, Ras3_r2, Ras3_r3))),
+    n_Protein_ML82 = sum(is.finite(c(ML82_r1, ML82_r2, ML82_r3)))
+  ),
+  by = Orthogroup
+]
+
+## --- hybrid ---
+protein_hyc_rep <- common_for_protein[, lapply(.SD, sum_na), by = Orthogroup, .SDcols = hyc_protein_cols]
+hyc_norm <- normalise_reps(protein_hyc_rep)
+protein_hyc_norm <- hyc_norm$norm
+
+protein_hyc_reps <- copy(protein_hyc_norm)
+setnames(
+  protein_hyc_reps, hyc_protein_cols,
+  sub("^HYC([0-9]+)_(r|rep)([0-9]+)$", "Protein_HYC\\1_rep\\3", hyc_protein_cols)
+)
+
+protein_hyc <- copy(protein_hyc_norm)
+for (h in hyc_protein_groups) {
+  protein_hyc[
+    ,
+    (paste0("Protein_HYC_", hyc_line_map[[h]])) := rowMeans(.SD, na.rm = TRUE),
+    .SDcols = paste0(h, "_r", 1:3)
+  ]
+}
+protein_hyc[, Protein_HYC_mean := rowMeans(.SD, na.rm = TRUE), .SDcols = paste0("Protein_HYC_", hyc_line_map)]
+for (cc in c(paste0("Protein_HYC_", hyc_line_map), "Protein_HYC_mean")) {
+  protein_hyc[is.nan(get(cc)), (cc) := NA_real_]
+}
+protein_hyc <- protein_hyc[, c("Orthogroup", paste0("Protein_HYC_", hyc_line_map), "Protein_HYC_mean"), with = FALSE]
+
+cat("Parental orthogroups:", nrow(protein_parent), "\n")
+cat("Hybrid orthogroups:", sum(is.finite(protein_hyc$Protein_HYC_mean)), "\n")
+print(data.table(replicate = names(protein_medians), median = as.numeric(protein_medians)))
+```
+
+# RNA (parental and hybrid)
+
+```{r}
+#| label: rna-tables
+#| warning: false
+
+rna <- fread(normalized_transcriptome_file)
+stopifnot("gene_id" %in% names(rna))
+
+get_rep_cols <- function(dt, group_name) {
+  cols <- grep(paste0("^", group_name, "_(r|rep)[123]$"), names(dt), value = TRUE)
+  if (length(cols) != 3L) {
+    stop("Expected exactly 3 RNA replicate columns for ", group_name, ", found: ", paste(cols, collapse = ", "))
+  }
+  cols
+}
+
+rna_ras3_cols <- get_rep_cols(rna, "Ras3")
+rna_ml82_cols <- get_rep_cols(rna, "ML82")
+
+## ---- parental RNA ----
+rna_parent <- merge(
+  og_1to1[, .(Orthogroup, mel_gene, sim_gene)],
+  rna[, c("gene_id", rna_ras3_cols, rna_ml82_cols), with = FALSE],
+  by.x = "mel_gene", by.y = "gene_id", all.x = TRUE
+)
+
+rna_sim_lookup <- rna[, c("gene_id", rna_ml82_cols), with = FALSE]
+setnames(rna_sim_lookup, rna_ml82_cols, paste0(rna_ml82_cols, "_sim"))
+rna_parent <- merge(rna_parent, rna_sim_lookup, by.x = "sim_gene", by.y = "gene_id", all.x = TRUE)
+
+rna_parent[, RNA_Ras3 := rowMeans(.SD, na.rm = TRUE), .SDcols = rna_ras3_cols]
+sim_ml82_cols <- paste0(rna_ml82_cols, "_sim")
+rna_parent[, RNA_ML82 := rowMeans(.SD, na.rm = TRUE), .SDcols = sim_ml82_cols]
+rna_parent[is.nan(RNA_Ras3), RNA_Ras3 := NA_real_]
+rna_parent[is.nan(RNA_ML82), RNA_ML82 := NA_real_]
+
+rna_parent_reps <- rna_parent[
+  ,
+  c("Orthogroup", rna_ras3_cols, sim_ml82_cols),
+  with = FALSE
+]
+setnames(
+  rna_parent_reps,
+  c(rna_ras3_cols, sim_ml82_cols),
+  c(paste0("RNA_Ras3_rep", 1:3), paste0("RNA_ML82_rep", 1:3))
+)
+
+rna_parent <- rna_parent[, .(Orthogroup, mel_gene, sim_gene, RNA_Ras3, RNA_ML82)]
+
+## ---- hybrid RNA, per line (named with the RNA library labels 5A/5B/6B/7B) ----
+hyc_line_labels <- unname(hyc_line_map)
+
+for (h in hyc_protein_groups) {
+  cc <- get_rep_cols(rna, hyc_line_map[[h]])
+  rna[, (paste0("HYC_RNA_", hyc_line_map[[h]])) := rowMeans(.SD, na.rm = TRUE), .SDcols = cc]
+}
+rna[, RNA_HYC := rowMeans(.SD, na.rm = TRUE), .SDcols = paste0("HYC_RNA_", hyc_line_labels)]
+
+hyc_lookup <- rna[, c("gene_id", paste0("HYC_RNA_", hyc_line_labels), "RNA_HYC"), with = FALSE]
+
+hyc_mel <- copy(hyc_lookup)
+setnames(
+  hyc_mel,
+  c(paste0("HYC_RNA_", hyc_line_labels), "RNA_HYC"),
+  c(paste0("RNA_HYC_mel_", hyc_line_labels), "RNA_HYC_mel")
+)
+
+hyc_sim <- copy(hyc_lookup)
+setnames(
+  hyc_sim,
+  c(paste0("HYC_RNA_", hyc_line_labels), "RNA_HYC"),
+  c(paste0("RNA_HYC_sim_", hyc_line_labels), "RNA_HYC_sim")
+)
+
+rna_hyc <- merge(
+  og_1to1[, .(Orthogroup, mel_gene, sim_gene)],
+  hyc_mel, by.x = "mel_gene", by.y = "gene_id", all.x = TRUE
+)
+rna_hyc <- merge(rna_hyc, hyc_sim, by.x = "sim_gene", by.y = "gene_id", all.x = TRUE)
+rna_hyc[, c("mel_gene", "sim_gene") := NULL]
+
+rna_hyc[, hyc_log2_mel_sim := log2(RNA_HYC_mel / RNA_HYC_sim)]
+rna_hyc[!is.finite(hyc_log2_mel_sim), hyc_log2_mel_sim := NA_real_]
+
+cat("Orthogroups with hybrid allelic RNA on both sides:", sum(is.finite(rna_hyc$hyc_log2_mel_sim)), "\n")
+cat("Median hybrid allelic log2(mel/sim):", round(median(rna_hyc$hyc_log2_mel_sim, na.rm = TRUE), 3), "\n")
+```
+
+# Per-cell-line orthogroup RNA versus protein
+
+```{r}
+#| label: fig1-sample-rna-protein
+#| warning: false
+#| fig-width: 7.09
+#| fig-height: 1.57
+
+## --- orthogroup x sample: protein from common peptides, long ---
+og_protein_long <- rbindlist(list(
+  data.table(Orthogroup = protein_parent$Orthogroup, Sample = "Ras3", Protein = protein_parent$Protein_Ras3),
+  data.table(Orthogroup = protein_parent$Orthogroup, Sample = "ML82", Protein = protein_parent$Protein_ML82),
+  rbindlist(lapply(hyc_protein_groups, function(h) {
+    data.table(
+      Orthogroup = protein_hyc$Orthogroup,
+      Sample = h,
+      Protein = protein_hyc[[paste0("Protein_HYC_", hyc_line_map[[h]])]]
+    )
+  }))
+))
+
+## --- orthogroup x sample: total RNA (mel + sim member), long ---
+og_rna_long <- rbindlist(list(
+  data.table(Orthogroup = rna_parent$Orthogroup, Sample = "Ras3", RNA = rna_parent$RNA_Ras3),
+  data.table(Orthogroup = rna_parent$Orthogroup, Sample = "ML82", RNA = rna_parent$RNA_ML82),
+  rbindlist(lapply(hyc_protein_groups, function(h) {
+    data.table(
+      Orthogroup = rna_hyc$Orthogroup,
+      Sample = h,
+      RNA = rna_hyc[[paste0("RNA_HYC_mel_", hyc_line_map[[h]])]] +
+            rna_hyc[[paste0("RNA_HYC_sim_", hyc_line_map[[h]])]]
+    )
+  }))
+))
+
+og_total <- merge(og_protein_long, og_rna_long, by = c("Orthogroup", "Sample"), all = FALSE)
+og_total <- og_total[is.finite(Protein) & Protein > 0 & is.finite(RNA) & RNA > 0]
+og_total[, logProtein := log2(Protein)]
+og_total[, logRNA := log2(RNA)]
+og_total[, logPR := logProtein - logRNA]
+og_total[, Sample := factor(Sample, levels = sample_order)]
+
+cat("Orthogroup x sample rows:", nrow(og_total), "\n")
+print(og_total[, .N, by = Sample])
+```
+
+```{r}
+#| label: fig1-sample-rna-protein-plot
+#| warning: false
+#| fig-width: 7.09
+#| fig-height: 1.57
+
+safe_r2 <- function(x, y, min_n) {
+  keep <- is.finite(x) & is.finite(y)
+  x <- x[keep]
+  y <- y[keep]
+  if (length(x) < min_n) return(NA_real_)
+  cr <- suppressWarnings(cor(x, y, use = "complete.obs", method = "pearson"))
+  cr^2
+}
+
+stats_fig1 <- og_total[, .(R2 = safe_r2(logRNA, logProtein, min_n)), by = Sample]
+stats_fig1[, Sample := factor(as.character(Sample), levels = sample_order)]
+stats_fig1[, label := fifelse(is.na(R2), "R\u00b2 = NA", sprintf("R\u00b2 = %.2f", R2))]
+
+p_fig1 <- ggplot(og_total, aes(x = logRNA, y = logProtein)) +
+  ggrastr::rasterise(
+    ggpointdensity::geom_pointdensity(size = 0.30, alpha = 0.80, adjust = 1),
+    dpi = 900
+  ) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, colour = "black", linewidth = 0.20) +
+  geom_text(
+    data = stats_fig1,
+    aes(x = -Inf, y = Inf, label = label),
+    inherit.aes = FALSE, hjust = -0.12, vjust = 1.3,
+    size = r2_text_size / ggplot2::.pt, family = "sans", colour = "black"
+  ) +
+  facet_wrap(~ Sample, nrow = 1, drop = FALSE) +
+  scale_colour_gradientn(colours = density_colours, name = "Point density") +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.10))) +
+  labs(x = expression(log[2](orthogroup~RNA)), y = expression(log[2](orthogroup~protein))) +
+  coord_cartesian(clip = "off") +
+  theme_paper +
+  theme(legend.position = "right")
+
+p_fig1
+```
+
+```{r}
+#| label: save-fig1
+#| warning: false
+
+p_fig1 + ggview::canvas(width = 170, height = 40, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "Support_per_cell_line_RNA_vs_protein.pdf"), p_fig1, dpi = 1200, units = "mm", width = 170, height = 40, bg = "transparent")
+```
+
+# Cross-cell-line comparison of protein / RNA
+
+```{r}
+#| label: fig2-logpr-matrix
+#| warning: false
+#| fig-width: 7.09
+#| fig-height: 3.54
+
+ratio_wide <- dcast(og_total, Orthogroup ~ Sample, value.var = "logPR")
+for (sample_name in sample_order) {
+  if (!sample_name %in% names(ratio_wide)) ratio_wide[, (sample_name) := NA_real_]
+}
+ratio_matrix <- as.data.frame(ratio_wide[, ..sample_order])
+ratio_matrix[] <- lapply(ratio_matrix, as.numeric)
+
+ratio_values <- unlist(ratio_matrix, use.names = FALSE)
+ratio_values <- ratio_values[is.finite(ratio_values)]
+if (length(ratio_values) == 0) stop("No finite protein/RNA ratio available for the cross-cell-line matrix.")
+ratio_lim <- range(ratio_values)
+ratio_padding <- diff(ratio_lim) * 0.03
+if (!is.finite(ratio_padding) || ratio_padding == 0) ratio_padding <- 1
+ratio_lim <- ratio_lim + c(-ratio_padding, ratio_padding)
+ratio_breaks <- pretty(ratio_lim, n = 3)
+
+theme_matrix_data <- theme_bw(base_family = "sans") +
+  theme(
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.1),
+    axis.line = element_blank(),
+    axis.text.x = element_text(size = axis_text_size, colour = "black", family = "sans"),
+    axis.text.y = element_text(size = axis_text_size, colour = "black", family = "sans"),
+    axis.title = element_blank(),
+    axis.ticks = element_line(linewidth = 0.2, colour = "black"),
+    axis.ticks.length = unit(1.2, "pt"),
+    legend.position = "none",
+    plot.margin = margin(panel_gap_pt / 2, panel_gap_pt / 2, panel_gap_pt / 2, panel_gap_pt / 2, unit = "pt")
+  )
+
+theme_matrix_empty <- theme_void(base_family = "sans") +
+  theme(
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.1),
+    legend.position = "none",
+    plot.margin = margin(panel_gap_pt / 2, panel_gap_pt / 2, panel_gap_pt / 2, panel_gap_pt / 2, unit = "pt")
+  )
+
+make_ratio_panel <- function(x_sample, y_sample, row_index, col_index) {
+  x <- ratio_matrix[[x_sample]]
+  y <- ratio_matrix[[y_sample]]
+  keep <- is.finite(x) & is.finite(y)
+  dt <- data.frame(x = x[keep], y = y[keep])
+  if (row_index > col_index) {
+    p <- ggplot(dt, aes(x, y)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.20, colour = "grey60") +
+      ggrastr::rasterise(ggpointdensity::geom_pointdensity(size = 0.18, alpha = 0.75, adjust = 1, show.legend = FALSE), dpi = 300) +
+      scale_colour_gradientn(colours = density_colours) +
+      scale_x_continuous(limits = ratio_lim, breaks = ratio_breaks, expand = expansion(mult = c(0.02, 0.02))) +
+      scale_y_continuous(limits = ratio_lim, breaks = ratio_breaks, expand = expansion(mult = c(0.02, 0.02))) +
+      theme_matrix_data
+  }
+  if (row_index == col_index) {
+    p <- ggplot() + scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) + scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) + theme_matrix_empty
+  }
+  if (row_index < col_index) {
+    R2 <- safe_r2(x, y, min_n)
+    label <- if (is.na(R2)) "R\u00b2 = NA" else sprintf("R\u00b2 = %.2f", R2)
+    r2_dt <- data.frame(x = 0.5, y = 0.5, R2 = R2, label = label)
+    p <- ggplot(r2_dt, aes(x, y)) +
+      geom_tile(aes(fill = R2), width = 1, height = 1) +
+      geom_text(aes(label = label), size = r2_text_size / ggplot2::.pt, family = "sans", colour = "black") +
+      scale_fill_gradientn(colours = r2_colours, values = scales::rescale(c(0, 0.50, 0.70, 0.85, 0.95, 1)), limits = c(0, 1), oob = scales::squish, na.value = "transparent") +
+      scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
+      scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+      theme_matrix_empty
+  }
+  if (row_index != length(sample_order)) p <- p + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  if (col_index != 1) p <- p + theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+  p
+}
+
+fig2_panels <- vector("list", length(sample_order)^2)
+panel_index <- 1
+for (i in seq_along(sample_order)) {
+  for (j in seq_along(sample_order)) {
+    fig2_panels[[panel_index]] <- make_ratio_panel(sample_order[j], sample_order[i], i, j)
+    panel_index <- panel_index + 1
+  }
+}
+
+matrix_core <- cowplot::plot_grid(plotlist = fig2_panels, ncol = length(sample_order), rel_widths = rep(1, length(sample_order)), rel_heights = rep(1, length(sample_order)), align = "hv", axis = "tblr", scale = 1)
+
+matrix_left <- 0.115
+matrix_bottom <- 0.125
+matrix_width <- 0.875
+matrix_height <- 0.87
+n_samples <- length(sample_order)
+column_x <- matrix_left + matrix_width * ((seq_len(n_samples) - 0.5) / n_samples)
+row_y <- matrix_bottom + matrix_height * (1 - (seq_len(n_samples) - 0.5) / n_samples)
+
+fig2_main <- cowplot::ggdraw() + cowplot::draw_plot(matrix_core, x = matrix_left, y = matrix_bottom, width = matrix_width, height = matrix_height)
+for (j in seq_along(sample_order)) fig2_main <- fig2_main + cowplot::draw_label(sample_order[j], x = column_x[j], y = 0.091, size = sample_label_size, fontfamily = "sans", colour = "black", hjust = 0.5, vjust = 0.5)
+for (i in seq_along(sample_order)) fig2_main <- fig2_main + cowplot::draw_label(sample_order[i], x = 0.088, y = row_y[i], size = sample_label_size, fontfamily = "sans", colour = "black", hjust = 1, vjust = 0.5)
+fig2_main <- fig2_main +
+  cowplot::draw_label(expression(log[2] * "(orthogroup protein / RNA)"), x = matrix_left + matrix_width / 2, y = 0.025, size = axis_title_size, fontfamily = "sans", colour = "black") +
+  cowplot::draw_label(expression(log[2] * "(orthogroup protein / RNA)"), x = 0.018, y = matrix_bottom + matrix_height / 2, size = axis_title_size, fontfamily = "sans", colour = "black", angle = 90)
+
+theme_compact_legend <- theme_void(base_family = "sans") +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = legend_title_size, colour = "black", family = "sans", hjust = 0.5),
+    legend.text = element_text(size = legend_text_size, colour = "black", family = "sans"),
+    legend.background = element_rect(fill = "transparent", colour = NA),
+    legend.box.background = element_rect(fill = "transparent", colour = NA),
+    legend.key = element_rect(fill = "transparent", colour = NA),
+    legend.margin = margin(0, 0, 0, 0),
+    plot.margin = margin(0, 0, 0, 0)
+  )
+
+density_legend_plot <- ggplot(data.frame(x = 1:100, y = 1, density = seq(0, 1, length.out = 100)), aes(x, y, colour = density)) +
+  geom_point() +
+  scale_colour_gradientn(colours = density_colours, limits = c(0, 1), breaks = c(0, 1), labels = c("Low", "High"), name = "Point density") +
+  guides(colour = guide_colourbar(title.position = "top", title.hjust = 0.5, barwidth = unit(legend_bar_width_pt, "pt"), barheight = unit(legend_bar_height_pt, "pt"), ticks = FALSE, frame.colour = "black", frame.linewidth = 0.1)) +
+  theme_compact_legend
+
+r2_legend_plot <- ggplot(data.frame(x = 1:100, y = 1, R2 = seq(0, 1, length.out = 100)), aes(x, y, fill = R2)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = r2_colours, values = scales::rescale(c(0, 0.50, 0.70, 0.85, 0.95, 1)), limits = c(0, 1), breaks = c(0, 0.5, 1), name = expression(R^2)) +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5, barwidth = unit(legend_bar_width_pt, "pt"), barheight = unit(legend_bar_height_pt, "pt"), ticks = FALSE, frame.colour = "black", frame.linewidth = 0.1)) +
+  theme_compact_legend
+
+density_legend <- cowplot::get_legend(density_legend_plot)
+r2_legend <- cowplot::get_legend(r2_legend_plot)
+legend_stack <- cowplot::ggdraw() +
+  cowplot::draw_plot(density_legend, x = 0, y = 0.60, width = 1, height = 0.25, hjust = 0) +
+  cowplot::draw_plot(r2_legend, x = 0, y = 0.30, width = 1, height = 0.25, hjust = 0)
+
+p_fig2 <- cowplot::plot_grid(fig2_main, legend_stack, ncol = 2, rel_widths = c(1, legend_column_width), align = "h", axis = "tb")
+p_fig2
+```
+
+```{r}
+#| label: save-fig2
+#| warning: false
+
+p_fig2 + ggview::canvas(width = 170, height = 90, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "Support_cross_cell_line_logPR_matrix.pdf"), p_fig2, dpi = 1200, units = "mm", width = 170, height = 90, bg = "transparent")
+```
+
+# Build the parental K table
+
+```{r}
+#| label: master-k-table
+#| warning: false
+
+K_table <- merge(og_1to1, common_qc, by = "Orthogroup", all = FALSE)
+K_table <- K_table[Orthogroup %in% eligible_ogs]
+K_table <- merge(K_table, protein_parent, by = "Orthogroup", all = FALSE)
+K_table <- merge(K_table, rna_parent[, .(Orthogroup, RNA_Ras3, RNA_ML82)], by = "Orthogroup", all = FALSE)
+
+K_table <- K_table[
+  is.finite(Protein_Ras3) & is.finite(Protein_ML82) & Protein_Ras3 > 0 & Protein_ML82 > 0 &
+  is.finite(RNA_Ras3) & is.finite(RNA_ML82) & RNA_Ras3 > 0 & RNA_ML82 > 0
+]
+
+if (deduplicate_gene_pairs) {
+  K_table <- K_table[order(-n_common_peptide_sequences, Orthogroup)]
+  K_table <- unique(K_table, by = c("mel_gene", "sim_gene"))
+}
+
+K_table <- K_table[RNA_Ras3 >= min_rna_each_parent & RNA_ML82 >= min_rna_each_parent]
+
+## Hybrid protein / RNA controls.
+K_table <- merge(K_table, protein_hyc, by = "Orthogroup", all.x = TRUE)
+K_table <- merge(K_table, rna_hyc, by = "Orthogroup", all.x = TRUE)
+
+K_table[, Kmel := Protein_Ras3 / RNA_Ras3]
+K_table[, Ksim := Protein_ML82 / RNA_ML82]
+K_table[, log2_Kmel := log2(Kmel)]
+K_table[, log2_Ksim := log2(Ksim)]
+K_table[, protein_log2_ratio := log2(Protein_Ras3 / Protein_ML82)]
+K_table[, RNA_log2_ratio := log2(RNA_Ras3 / RNA_ML82)]
+K_table[, log2_Kratio := log2(Kmel / Ksim)]
+K_table[, abs_log2_Kratio := abs(log2_Kratio)]
+
+K_table[, hyc_concordant := sign(hyc_log2_mel_sim) == sign(RNA_log2_ratio)]
+K_table[, dRNA_HYC_mel := log2(RNA_HYC_mel / RNA_Ras3)]
+K_table[, dRNA_HYC_sim := log2(RNA_HYC_sim / RNA_ML82)]
+
+delta_check <- K_table[, max(abs(log2_Kratio - (protein_log2_ratio - RNA_log2_ratio)), na.rm = TRUE)]
+stopifnot(is.finite(delta_check), delta_check < 1e-8)
+
+setorder(K_table, log2_Kratio)
+K_table[, rank := .I]
+K_table[, percentile := 100 * (rank - 0.5) / .N]
+K_table[, direction := fifelse(log2_Kratio > 0, "mel higher K", fifelse(log2_Kratio < 0, "sim higher K", "equal"))]
+
+cat("Final K-table orthogroups:", nrow(K_table), "\n")
+cat("Median log2(Kmel/Ksim):", median(K_table$log2_Kratio), "\n")
+cat("Median |log2(Kmel/Ksim)|:", median(K_table$abs_log2_Kratio), "\n")
+```
+
+# Distribution of protein-to-RNA conversion divergence between the parental lines
+
+```{r}
+#| label: panel-b-distribution
+#| warning: false
+#| fig-width: 2.36
+#| fig-height: 1.97
+
+median_k <- median(K_table$log2_Kratio, na.rm = TRUE)
+
+p_panel_b <- ggplot(K_table, aes(x = log2_Kratio)) +
+  geom_density(fill = pal_blue, colour = pal_purple, linewidth = 0.5, alpha = 0.55) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey30") +
+  labs(x = expression(log[2](K[p_mel] / K[p_sim])), y = "Density") +
+  theme_paper
+
+p_panel_b
+```
+
+```{r}
+#| label: save-panel-b
+#| warning: false
+
+p_panel_b + ggview::canvas(width = 80, height = 60, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelB_K_divergence.pdf"), p_panel_b, dpi = 1200, units = "mm", width = 80, height = 60, bg = "transparent")
+```
+
+# Parental K comparison (Ras3 versus ML82)
+
+```{r}
+#| label: fig-kmel-ksim
+#| warning: false
+#| fig-width: 2.36
+#| fig-height: 2.36
+
+label_selected <- K_table[selected_gene == TRUE]
+
+pearson_k <- cor(K_table$log2_Kmel, K_table$log2_Ksim, use = "complete.obs")
+spearman_k <- cor(K_table$log2_Kmel, K_table$log2_Ksim, use = "complete.obs", method = "spearman")
+
+p_kmel_ksim <- ggplot(K_table, aes(x = log2_Kmel, y = log2_Ksim)) +
+  ggrastr::rasterise(geom_point(size = point_size, alpha = point_alpha, colour = "grey45"), dpi = 600) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey30") +
+  geom_point(data = label_selected, size = 1.2, colour = fit_colour) +
+  ggrepel::geom_text_repel(
+    data = label_selected, aes(label = selected_label),
+    size = 1.9, family = "sans", max.overlaps = Inf, min.segment.length = 0, segment.size = 0.15
+  ) +
+  annotate(
+    "text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.2, size = 1.9,
+    label = sprintf("Pearson r = %.3f\nSpearman rho = %.3f\nn = %d", pearson_k, spearman_k, nrow(K_table))
+  ) +
+  labs(x = expression(log[2](K[p_mel])), y = expression(log[2](K[p_sim]))) +
+  coord_equal(clip = "off") +
+  theme_paper
+
+p_kmel_ksim
+```
+
+```{r}
+#| label: save-kmel-ksim
+#| warning: false
+
+p_kmel_ksim + ggview::canvas(width = 60, height = 60, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelB_Kmel_vs_Ksim.pdf"), p_kmel_ksim, dpi = 1200, units = "mm", width = 60, height = 60, bg = "transparent")
+```
+
+```{r}
+#| label: fig-rna-protein
+#| warning: false
+#| fig-width: 2.36
+#| fig-height: 2.36
+
+p_rna_protein <- ggplot(K_table, aes(x = RNA_log2_ratio, y = protein_log2_ratio)) +
+  ggrastr::rasterise(geom_point(size = point_size, alpha = point_alpha, colour = "grey45"), dpi = 600) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey30") +
+  geom_point(data = label_selected, size = 1.2, colour = fit_colour) +
+  ggrepel::geom_text_repel(
+    data = label_selected, aes(label = selected_label),
+    size = 1.9, family = "sans", max.overlaps = Inf, min.segment.length = 0, segment.size = 0.15
+  ) +
+  labs(x = expression(log[2](RNA[mel] / RNA[sim])), y = expression(log[2](Protein[mel] / Protein[sim]))) +
+  coord_equal() +
+  theme_paper
+
+p_rna_protein
+```
+
+```{r}
+#| label: save-rna-protein
+#| warning: false
+
+p_rna_protein + ggview::canvas(width = 60, height = 60, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelB_RNA_vs_protein.pdf"), p_rna_protein, dpi = 1200, units = "mm", width = 60, height = 60, bg = "transparent")
+```
+
+```{r}
+#| label: fig-waterfall
+#| warning: false
+#| fig-width: 6.30
+#| fig-height: 1.97
+
+top_low <- head(K_table[order(log2_Kratio)], top_n_each_tail)
+top_high <- head(K_table[order(-log2_Kratio)], top_n_each_tail)
+
+waterfall_labels <- unique(
+  rbindlist(list(K_table[selected_gene == TRUE], top_low, top_high), fill = TRUE),
+  by = "Orthogroup"
+)
+waterfall_labels[, plot_label := fifelse(selected_gene == TRUE, selected_label, mel_symbol)]
+
+p_waterfall <- ggplot(K_table, aes(x = rank, y = log2_Kratio)) +
+  # ggrastr::rasterise(geom_segment(aes(xend = rank, y = 0, yend = log2_Kratio), linewidth = 0.15, colour = "grey90"), dpi = 600) +
+  ggrastr::rasterise(geom_point(size = 0.4, colour = "grey50"), dpi = 600) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey30") +
+  geom_point(
+    data = waterfall_labels,
+    aes(colour = fifelse(selected_gene == TRUE, "Selected genes", "Extreme K")),
+    size = 1.2
+  ) +
+  ggrepel::geom_text_repel(
+    data = waterfall_labels, 
+    aes(label = plot_label),
+    size = 1.8, 
+    family = "sans", 
+    max.overlaps = Inf, 
+    min.segment.length = 0, 
+    segment.size = 0.15, 
+    seed = 123,
+    force = 3,            # Increase repulsion between points and labels to avoid overlap
+    force_pull = 1,       # How strongly labels are pulled back toward their anchors
+    box.padding = 0.35,   # Increase padding around label boxes to separate neighbours
+    point.padding = 0.2
+  ) +
+  scale_colour_manual(
+    values = c("Selected genes" = fit_colour, "Extreme K" = pal_blue),
+    name = NULL
+  ) +
+  labs(
+    x = "Orthogroup rank", # Simplified x-axis title (alternatives: "Rank" or "Gene rank")
+    y = expression(log[2](K[p_mel] / K[p_sim]))
+  ) +
+  theme_paper +
+  theme(
+    legend.position = "right" # move the legend to the right
+  )
+
+p_waterfall
+```
+
+```{r}
+#| label: save-waterfall
+#| warning: false
+
+p_waterfall + ggview::canvas(width = 170, height = 70, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelB_waterfall.pdf"), p_waterfall, dpi = 1200, units = "mm", width = 170, height = 70, bg = "transparent")
+```
+
+```{r}
+#| label: fig-top-extremes
+#| warning: false
+#| fig-width: 2.95
+#| fig-height: 3.54
+
+top_extreme_plot <- unique(
+  rbind(head(K_table[order(log2_Kratio)], top_n_each_tail), head(K_table[order(-log2_Kratio)], top_n_each_tail)),
+  by = "Orthogroup"
+)
+top_extreme_plot[, display_gene := fifelse(!is.na(mel_symbol) & mel_symbol != "", mel_symbol, mel_gene)]
+top_extreme_plot[, display_gene := factor(display_gene, levels = unique(display_gene[order(log2_Kratio)]))]
+
+p_extremes <- ggplot(top_extreme_plot, aes(x = log2_Kratio, y = display_gene, fill = direction)) +
+  geom_col(width = 0.72) +
+  geom_vline(xintercept = 0, linewidth = 0.3, colour = "black") +
+  scale_fill_manual(
+    values = c("mel higher K" = pal_orange, "sim higher K" = pal_blue, "equal" = "grey70"),
+    name = NULL
+  ) +
+  labs(x = expression(log[2](K[p_mel] / K[p_sim])), y = NULL) +
+  theme_paper +
+  theme(legend.position = "top")
+
+p_extremes
+```
+
+```{r}
+#| label: save-top-extremes
+#| warning: false
+
+p_extremes + ggview::canvas(width = 75, height = 90, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelB_top_extremes.pdf"), p_extremes, dpi = 1200, units = "mm", width = 75, height = 90, bg = "transparent")
+```
+
+```{r}
+#| label: fig-k-vs-rna
+#| warning: false
+#| fig-width: 2.36
+#| fig-height: 1.97
+
+## Extreme K values are enriched among orthogroups whose weak side is lowly expressed.
+K_table[, rna_weak := pmin(RNA_Ras3, RNA_ML82)]
+
+p_k_vs_rna <- ggplot(K_table, aes(x = log10(rna_weak + 1), y = abs_log2_Kratio)) +
+  ggrastr::rasterise(geom_point(size = point_size, alpha = point_alpha, colour = "grey45"), dpi = 600) +
+  geom_smooth(method = "loess", formula = y ~ x, colour = fit_colour, fill = "grey85", linewidth = 0.4, span = 0.6) +
+  labs(x = expression(log[10](weak-side~RNA + 1)), y = expression("|" * log[2](K[p_mel] / K[p_sim]) * "|")) +
+  theme_paper
+
+p_k_vs_rna
+```
+
+```{r}
+#| label: save-k-vs-rna
+#| warning: false
+
+p_k_vs_rna + ggview::canvas(width = 60, height = 50, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelB_K_vs_weakRNA.pdf"), p_k_vs_rna, dpi = 1200, units = "mm", width = 60, height = 50, bg = "transparent")
+```
+
+# Tables for manual inspection
+
+```{r}
+#| label: manual-tables
+#| warning: false
+
+round_manual <- function(dt) {
+  out <- copy(dt)
+  for (cc in names(out)) if (is.numeric(out[[cc]])) out[[cc]] <- signif(out[[cc]], 3)
+  out
+}
+
+manual_cols <- c(
+  "Orthogroup", "mel_symbol", "mel_gene", "sim_gene",
+  "n_common_peptide_sequences", "n_common_detected_Ras3", "n_common_detected_ML82",
+  "Protein_Ras3", "Protein_ML82", "RNA_Ras3", "RNA_ML82",
+  "RNA_HYC_mel", "RNA_HYC_sim", "hyc_log2_mel_sim",
+  "Kmel", "Ksim", "protein_log2_ratio", "RNA_log2_ratio", "log2_Kratio", "percentile"
+)
+
+top_mel_k <- round_manual(head(K_table[order(-log2_Kratio), .SD, .SDcols = manual_cols], top_n_each_tail))
+top_sim_k <- round_manual(head(K_table[order(log2_Kratio), .SD, .SDcols = manual_cols], top_n_each_tail))
+
+knitr::kable(top_mel_k, format = "html", row.names = FALSE)
+knitr::kable(top_sim_k, format = "html", row.names = FALSE)
+```
+
+# Selected genes
+
+```{r}
+#| label: selected-gene-results
+#| warning: false
+
+selected_results <- K_table[
+  selected_gene == TRUE,
+  .(
+    selected_label, Orthogroup, mel_gene, sim_gene, mel_symbol, gene_description,
+    n_common_peptide_sequences, n_common_detected_Ras3, n_common_detected_ML82,
+    Protein_Ras3, Protein_ML82, RNA_Ras3, RNA_ML82,
+    Kmel, Ksim, protein_log2_ratio, RNA_log2_ratio, log2_Kratio, rank, percentile
+  )
+]
+setorder(selected_results, log2_Kratio)
+
+knitr::kable(round_manual(selected_results), format = "html", row.names = FALSE)
+```
+
+# Focus genes across the parental lines
+
+```{r}
+#| label: fig5-focus-genes
+#| warning: false
+#| fig-width: 7.09
+#| fig-height: 2.36
+
+focus_dt <- K_table[selected_gene == TRUE]
+setorder(focus_dt, selected_label, -n_common_peptide_sequences, rank)
+focus_dt <- unique(focus_dt, by = "selected_label")
+focus_dt[, PR_Ras3 := Protein_Ras3 / RNA_Ras3]
+focus_dt[, PR_ML82 := Protein_ML82 / RNA_ML82]
+
+make_focus_panel <- function(x, y, xlab, ylab) {
+  dt <- focus_dt[is.finite(get(x)) & is.finite(get(y)) & get(x) > 0 & get(y) > 0]
+  dt[, xlog := log2(get(x))]
+  dt[, ylog := log2(get(y))]
+  lim <- range(c(dt$xlog, dt$ylog), na.rm = TRUE)
+  ggplot(dt, aes(x = xlog, y = ylog, label = selected_label)) +
+    geom_point(size = 2.2, alpha = 0.9, colour = pal_blue) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey60") +
+    ggrepel::geom_text_repel(
+      size = 6 / ggplot2::.pt, family = "sans", colour = "black",
+      max.overlaps = Inf, box.padding = 0.3, point.padding = 0.1,
+      min.segment.length = 0.1, segment.colour = "grey60", segment.size = 0.25, segment.alpha = 0.6
+    ) +
+    scale_x_continuous(limits = lim, expand = expansion(mult = c(0.10, 0.10))) +
+    scale_y_continuous(limits = lim, expand = expansion(mult = c(0.10, 0.10))) +
+    labs(x = xlab, y = ylab) +
+    theme_paper +
+    theme(legend.position = "none") +
+    coord_fixed(ratio = 1, clip = "off")
+}
+
+p5_prot <- make_focus_panel(
+  "Protein_Ras3", "Protein_ML82",
+  expression(log[2](Ras3~orthogroup~protein)), expression(log[2](ML82~orthogroup~protein))
+)
+p5_rna <- make_focus_panel(
+  "RNA_Ras3", "RNA_ML82",
+  expression(log[2](Ras3~orthogroup~RNA)), expression(log[2](ML82~orthogroup~RNA))
+)
+p5_pr <- make_focus_panel(
+  "PR_Ras3", "PR_ML82",
+  expression(log[2](Ras3~protein/RNA)), expression(log[2](ML82~protein/RNA))
+)
+
+p_fig5 <- cowplot::plot_grid(p5_prot, p5_rna, p5_pr, ncol = 3, align = "h", axis = "tb", rel_widths = rep(1, 3))
+p_fig5
+```
+
+```{r}
+#| label: save-fig5
+#| warning: false
+
+p_fig5 + ggview::canvas(width = 180, height = 60, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "Support_focus_genes.pdf"), p_fig5, dpi = 1200, units = "mm", width = 180, height = 60, bg = "transparent")
+```
+
+# HYC allelic control
+
+```{r}
+#| label: hyc-control
+#| warning: false
+#| fig-width: 2.36
+#| fig-height: 2.36
+
+pearson_hyc <- cor(K_table$RNA_log2_ratio, K_table$hyc_log2_mel_sim, use = "complete.obs")
+concordance <- mean(K_table$hyc_concordant, na.rm = TRUE)
+
+cat("Pearson r (parental RNA ratio vs hybrid allelic ratio):", round(pearson_hyc, 3), "\n")
+cat("Sign concordance:", round(100 * concordance, 1), "%\n")
+
+p_hyc_control <- ggplot(
+  K_table[is.finite(hyc_log2_mel_sim)],
+  aes(x = RNA_log2_ratio, y = hyc_log2_mel_sim)
+) +
+  ggrastr::rasterise(geom_point(size = point_size, alpha = point_alpha, colour = "grey45"), dpi = 600) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey30") +
+  geom_smooth(method = "lm", formula = y ~ x, colour = fit_colour, fill = "grey85", linewidth = 0.4) +
+  labs(
+    x = expression(log[2](RNA[mel] / RNA[sim]) ~ "(parents)"),
+    y = expression(log[2](RNA[mel] / RNA[sim]) ~ "(hybrids)")
+  ) +
+  theme_paper
+
+p_hyc_control
+```
+
+```{r}
+#| label: save-hyc-control
+#| warning: false
+
+p_hyc_control + ggview::canvas(width = 60, height = 60, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelB_HYC_control.pdf"), p_hyc_control, dpi = 1200, units = "mm", width = 60, height = 60, bg = "transparent")
+```
+
+# Predicting the hybrid proteome from the parental conversion factors
+
+```{r}
+#| label: panel-c-prediction
+#| warning: false
+
+pred_long <- rbindlist(lapply(hyc_protein_groups, function(h) {
+  line_rna <- hyc_line_map[[h]]
+  data.table(
+    Orthogroup = K_table$Orthogroup,
+    mel_symbol = K_table$mel_symbol,
+    sample = h,
+    RNA_mel = K_table[[paste0("RNA_HYC_mel_", line_rna)]],
+    RNA_sim = K_table[[paste0("RNA_HYC_sim_", line_rna)]],
+    measured = K_table[[paste0("Protein_HYC_", line_rna)]],
+    Kmel = K_table$Kmel,
+    Ksim = K_table$Ksim
+  )
+}))
+
+pred_long[, predicted_full := Kmel * RNA_mel + Ksim * RNA_sim]
+pred_long[, predicted_mel_only := Kmel * (RNA_mel + RNA_sim)]
+pred_long[, predicted_sim_only := Ksim * (RNA_mel + RNA_sim)]
+pred_long[, predicted_mean_k := (Kmel + Ksim) / 2 * (RNA_mel + RNA_sim)]
+
+pred_long[, log2_measured := log2(measured)]
+pred_long[, log2_full := log2(predicted_full)]
+pred_long[, log2_mel_only := log2(predicted_mel_only)]
+pred_long[, log2_sim_only := log2(predicted_sim_only)]
+pred_long[, log2_mean_k := log2(predicted_mean_k)]
+
+pred_ok <- pred_long[
+  is.finite(log2_measured) & is.finite(log2_full) &
+  is.finite(log2_mel_only) & is.finite(log2_sim_only) & is.finite(log2_mean_k)
+]
+
+pred_ok[, sample := factor(sample, levels = hyc_protein_groups)]
+
+cor_summary <- pred_ok[
+  ,
+  .(
+    n = .N,
+    pearson = cor(log2_full, log2_measured),
+    spearman = cor(log2_full, log2_measured, method = "spearman"),
+    R2 = summary(lm(log2_measured ~ log2_full))$r.squared,
+    slope = coef(lm(log2_measured ~ log2_full))[2]
+  ),
+  by = sample
+]
+print(cor_summary)
+```
+
+```{r}
+#| label: fig-panel-c
+#| warning: false
+#| fig-width: 6.30
+#| fig-height: 1.97
+
+p_panel_c <- ggplot(pred_ok, aes(x = log2_full, y = log2_measured)) +
+  ggrastr::rasterise(
+    ggpointdensity::geom_pointdensity(size = 0.25, alpha = 0.75, adjust = 1),
+    dpi = 600
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey60") +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, colour = pal_blue, linewidth = 0.35) +
+  geom_text(
+    data = cor_summary,
+    aes(
+      x = -12, y = Inf, 
+      label = sprintf(
+        "Pearson r = %.2f\nSpearman \u03c1 = %.2f\nR\u00b2 = %.2f", 
+        pearson, spearman, R2
+      )
+    ),
+    hjust = 0,             # force multi-line text to be left-aligned
+    vjust = 1.15, 
+    size = r2_text_size / ggplot2::.pt, 
+    family = "sans", 
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ sample, nrow = 1, drop = FALSE) +
+  scale_colour_gradientn(colours = density_colours, name = "Point density") +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05))) + # leave a small left margin
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+  labs(
+    x = expression(log[2](predicted~orthogroup~protein)),
+    y = expression(log[2](measured~orthogroup~protein))
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_paper +
+  theme(legend.position = "none")
+
+p_panel_c
+```
+
+```{r}
+#| label: save-panel-c
+#| warning: false
+
+p_panel_c + ggview::canvas(width = 180, height = 60, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelC_predicted_vs_measured.pdf"), p_panel_c, dpi = 1200, units = "mm", width = 180, height = 60, bg = "transparent")
+```
+
+## Comparing alternative conversion-factor models
+
+| model            | predicted protein                             |
+|------------------|-----------------------------------------------|
+| Species-specific | `Kp_mel * RNA_mel + Kp_sim * RNA_sim`         |
+| mel-only K       | `Kp_mel * (RNA_mel + RNA_sim)`                |
+| sim-only K       | `Kp_sim * (RNA_mel + RNA_sim)`                |
+| mean K           | `(Kp_mel + Kp_sim) / 2 * (RNA_mel + RNA_sim)` |
+
+The three alternatives ignore the species identity of the transcripts.
+
+```{r}
+#| label: fig-panel-c-models
+#| warning: false
+#| fig-width: 4.72
+#| fig-height: 1.97
+
+model_long <- melt(
+  pred_ok,
+  measure.vars = c("log2_full", "log2_mel_only", "log2_sim_only", "log2_mean_k"),
+  variable.name = "model", value.name = "log2_pred"
+)
+model_long[, model := factor(
+  model,
+  levels = c("log2_full", "log2_mel_only", "log2_sim_only", "log2_mean_k"),
+  labels = c("Species-specific", "mel-only K", "sim-only K", "mean K")
+)]
+
+model_perf <- model_long[
+  ,
+  .(
+    n = .N,
+    pearson = cor(log2_pred, log2_measured),
+    spearman = cor(log2_pred, log2_measured, method = "spearman"),
+    R2 = summary(lm(log2_measured ~ log2_pred))$r.squared
+  ),
+  by = .(sample, model)
+]
+model_perf[, label := sprintf("r = %.2f\nrho = %.2f\nR2 = %.2f", pearson, spearman, R2)]
+
+p_model_r2 <- ggplot(model_perf, aes(x = model, y = R2, colour = model)) +
+  geom_point(size = 1.4) +
+  geom_line(aes(group = sample), colour = "grey80", linewidth = 0.3) +
+  scale_colour_manual(
+    values = c(
+      "Species-specific" = pal_teal, "mel-only K" = pal_orange,
+      "sim-only K" = pal_blue, "mean K" = pal_purple
+    ),
+    guide = "none"
+  ) +
+  facet_wrap(~ sample, nrow = 1) +
+  labs(x = NULL, y = expression(R^2)) +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+p_model_r2
+```
+
+```{r}
+#| label: save-model-r2
+#| warning: false
+
+p_model_r2 + ggview::canvas(width = 120, height = 50, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelC_model_R2.pdf"), p_model_r2, dpi = 1200, units = "mm", width = 120, height = 50, bg = "transparent")
+```
+
+The same four models are shown as predicted-versus-measured scatter plots (16 panels).
+
+```{r}
+#| label: fig-panel-c-model-scatter
+#| warning: false
+#| fig-width: 7.09
+#| fig-height: 7.09
+
+p_model_scatter <- ggplot(model_long, aes(x = log2_pred, y = log2_measured)) +
+  ggrastr::rasterise(
+    ggpointdensity::geom_pointdensity(size = 0.18, alpha = 0.75, adjust = 1),
+    dpi = 300
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 0.3, colour = "grey60") +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, colour = fit_colour, linewidth = 0.35) +
+  geom_text(
+    data = model_perf, aes(x = -Inf, y = Inf, label = label),
+    inherit.aes = FALSE, hjust = -0.08, vjust = 1.15, size = 1.6, family = "sans"
+  ) +
+  facet_grid(model ~ sample, scales = "free") +
+  scale_colour_gradientn(colours = density_colours, name = "Point density") +
+  labs(
+    x = expression(log[2](predicted~orthogroup~protein)),
+    y = expression(log[2](measured~orthogroup~protein))
+  ) +
+  theme_paper +
+  theme(legend.position = "none", panel.spacing = unit(2, "pt"))
+
+p_model_scatter
+```
+
+```{r}
+#| label: save-model-scatter
+#| warning: false
+
+p_model_scatter + ggview::canvas(width = 180, height = 180, units = "mm", dpi = 900, bg = "transparent")
+# ggsave(file.path(output_dir, "PanelC_model_scatter_grid.pdf"), p_model_scatter, dpi = 1200, units = "mm", width = 180, height = 180, bg = "transparent")
+```
+
+## Testing whether the species-specific model is significantly better
+
+`cocor` (Steiger 1980) tests the overlapping dependent correlations on Spearman values, with `dR2` as the effect size (`dR2 > 0` favours the species-specific model).
+
+```{r}
+#| label: panel-c-significance
+#| warning: false
+
+## For each hybrid line, compare the species-specific model against each alternative:
+## R2 of both fits (same orthogroups), their difference dR2, and the cocor p-value
+## for the two dependent correlations sharing the same measured values.
+sig_out <- rbindlist(lapply(hyc_protein_groups, function(h) {
+
+  d <- pred_ok[sample == h]
+  d <- d[is.finite(log2_measured)]
+
+  r2_full <- summary(lm(log2_measured ~ log2_full, data = d))$r.squared
+
+  rbindlist(lapply(c("log2_mel_only", "log2_sim_only", "log2_mean_k"), function(alt) {
+
+    r2_alt <- summary(lm(as.formula(paste("log2_measured ~", alt)), data = d))$r.squared
+
+    cocor_p <- NA_real_
+    if (requireNamespace("cocor", quietly = TRUE)) {
+      cc <- tryCatch(
+        suppressWarnings(cocor::cocor.dep.groups.overlap(
+          r.jk = cor(d$log2_full, d$log2_measured, method = "spearman"),
+          r.jh = cor(d[[alt]], d$log2_measured, method = "spearman"),
+          r.kh = cor(d$log2_full, d[[alt]], method = "spearman"),
+          n = nrow(d), alternative = "two.sided", test = "steiger1980"
+        )),
+        error = function(e) NULL
+      )
+      if (!is.null(cc)) cocor_p <- cc@steiger1980$p.value
+    }
+
+    data.table(
+      sample = h,
+      alternative = alt,
+      R2_full = r2_full,
+      R2_alt = r2_alt,
+      dR2 = r2_full - r2_alt,
+      n = nrow(d),
+      cocor_p = cocor_p
+    )
+  }))
+}), use.names = TRUE)
+
+print(sig_out)
+```
+
+# Summary
+
+```{r}
+#| label: summary-tables
+#| warning: false
+
+K_summary <- data.table(
+  metric = c(
+    "Precursor rows (Panel a unit)",
+    "Distinct peptide sequences (reference)",
+    "Strict 1:1 orthogroups",
+    paste0("Orthogroups with >=", min_common_peptides, " common peptide sequences"),
+    "Final orthogroups (K table)",
+    "Median log2(Kp_mel/Kp_sim)",
+    "Median |log2(Kp_mel/Kp_sim)|",
+    "Pearson r: log2 Kp_mel vs log2 Kp_sim",
+    "Spearman rho: log2 Kp_mel vs log2 Kp_sim",
+    "Hybrid allelic sign concordance (%)"
+  ),
+  value = c(
+    total_peptides,
+    total_sequences,
+    nrow(og_1to1),
+    length(eligible_ogs),
+    nrow(K_table),
+    median(K_table$log2_Kratio, na.rm = TRUE),
+    median(K_table$abs_log2_Kratio, na.rm = TRUE),
+    pearson_k,
+    spearman_k,
+    100 * concordance
+  )
+)
+
+K_summary
+```
+
+# Export
+
+```{r}
+#| label: export
+#| warning: false
+
+# if (save_outputs) {
+#
+#   panel_a_table |> fwrite(file.path(output_dir, "PanelA_peptide_overlap_counts.csv"))
+#   K_table |> fwrite(file.path(output_dir, "Panel_K_table.csv"))
+#   cor_summary |> fwrite(file.path(output_dir, "PanelC_prediction_summary.csv"))
+#   model_perf |> fwrite(file.path(output_dir, "PanelC_model_performance.csv"))
+#   pca_df |> fwrite(file.path(output_dir, "PanelA_peptide_PCA_coordinates.csv"))
+#   sig_out |> fwrite(file.path(output_dir, "PanelC_model_significance.csv"))
+#   K_summary |> fwrite(file.path(output_dir, "Panel_summary.csv"))
+#   og_total |> fwrite(file.path(output_dir, "Support_orthogroup_RNA_protein_table.csv"))
+#   focus_dt |> fwrite(file.path(output_dir, "Support_focus_genes_table.csv"))
+#
+#   save_fig(p_venn3, "PanelA_peptide_overlap.pdf", 50, 60)
+#   save_fig(p_pca, "PanelA_peptide_PCA.pdf", 80, 66)
+#   save_fig(p_panel_b, "PanelB_K_divergence.pdf", 60, 50)
+#   save_fig(p_kmel_ksim, "PanelB_Kmel_vs_Ksim.pdf", 60, 60)
+#   save_fig(p_rna_protein, "PanelB_RNA_vs_protein.pdf", 60, 60)
+#   save_fig(p_waterfall, "PanelB_waterfall.pdf", 160, 50)
+#   save_fig(p_extremes, "PanelB_top_extremes.pdf", 75, 90)
+#   save_fig(p_k_vs_rna, "PanelB_K_vs_weakRNA.pdf", 60, 50)
+#   save_fig(p_hyc_control, "PanelB_HYC_control.pdf", 60, 60)
+#   save_fig(p_panel_c, "PanelC_predicted_vs_measured.pdf", 160, 50)
+#   save_fig(p_model_r2, "PanelC_model_R2.pdf", 120, 50)
+#   save_fig(p_model_scatter, "PanelC_model_scatter_grid.pdf", 180, 180)
+#
+#   save_fig(p_fig1, "Support_per_cell_line_RNA_vs_protein.pdf", 170, 45)
+#   save_fig(p_fig2, "Support_cross_cell_line_logPR_matrix.pdf", 170, 130)
+#   save_fig(p_fig5, "Support_focus_genes.pdf", 180, 60)
+#
+#   cat("Outputs written to:", output_dir, "\n")
+# }
+```
+
+# Interpretation notes
+
+`log2(Kp_mel / Kp_sim) > 0` means the mel parent produces more protein per transcript than the sim parent, which is a statement about conversion, not abundance. Extreme K values concentrate where the weakly expressed side is near the detection limit, so the tails should always be read together with the peptide-support and parental-RNA columns.
